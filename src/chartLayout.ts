@@ -1,0 +1,1 @@
+export const PLOT_X = { left: 84, right: 16 }

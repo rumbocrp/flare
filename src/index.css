@@ -1,0 +1,75 @@
+:root {
+  color-scheme: dark;
+
+  --bg: #000000;
+  --bg-subtle: #050505;
+  --surface: #050505;
+  --surface-hover: #0a0a0a;
+  --surface-raised: #001a00;
+  --surface-raised-hover: #0a1a0a;
+  --border: #003b00;
+  --border-strong: #005518;
+  --chart-baseline: #003300;
+  --dot-off: #003300;
+  --text: #00ff41;
+  --text-muted: #00b51b;
+  --text-subtle: #009a14;
+  --accent: #00ff41;
+  --primary: #00ff41;
+  --primary-hover: #00cc33;
+  --on-primary: #000000;
+  --positive: #00cc33;
+  --negative: #ff0000;
+  --buy-bg: #001a0a;
+  --sell-bg: #1a0000;
+  --sell-text: #ffb454;
+  --positive-halo: rgba(0, 255, 65, 0.2);
+  --overlay-fast: #ffb454;
+  --overlay-slow: #5ec8ff;
+  --signal-buy: #ffffff;
+  --signal-sell: #ff4fa3;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --bg: #f0fff4;
+  --bg-subtle: #d4f7de;
+  --surface: #e8fff0;
+  --surface-hover: #d4f7de;
+  --surface-raised: #c2f3ca;
+  --surface-raised-hover: #b4efbc;
+  --border: #69e38a;
+  --border-strong: #4cc06a;
+  --chart-baseline: #9ef0ad;
+  --dot-off: #9ef0ad;
+  --text: #004d00;
+  --text-muted: #1f7a35;
+  --text-subtle: #2a7d3f;
+  --accent: #006b1b;
+  --primary: #008a2a;
+  --primary-hover: #006b20;
+  --on-primary: #ffffff;
+  --positive: #006b1b;
+  --negative: #cc0000;
+  --buy-bg: #dff7e8;
+  --sell-bg: #ffe6e6;
+  --sell-text: #aa3300;
+  --positive-halo: rgba(0, 170, 51, 0.2);
+  --overlay-fast: #b25e00;
+  --overlay-slow: #0b6fa8;
+  --signal-buy: #003d00;
+  --signal-sell: #b3126b;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'VT323', ui-monospace, monospace;
+  font-size: 1.2rem;
+}
