@@ -10,6 +10,7 @@ export const navItems: NavItem[] = [
   { id: 'dashboard', label: 'Panel', icon: '▦' },
   { id: 'bot-config', label: 'Ajustar bot', icon: '⚙' },
   { id: 'bot-run', label: 'Ejecutar bot', icon: '▶' },
+  { id: 'backtest', label: 'Backtest', icon: '⟲' },
   { id: 'stats', label: 'Estadísticas', icon: '◔' },
   { id: 'settings', label: 'Ajustes', icon: '☰' },
 ]

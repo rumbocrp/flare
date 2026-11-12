@@ -1,23 +1,23 @@
 :root {
   color-scheme: dark;
 
-  --bg: #000000;
-  --bg-subtle: #050505;
-  --surface: #050505;
-  --surface-hover: #0a0a0a;
-  --surface-raised: #001a00;
-  --surface-raised-hover: #0a1a0a;
-  --border: #003b00;
-  --border-strong: #005518;
-  --chart-baseline: #003300;
-  --dot-off: #003300;
-  --text: #00ff41;
-  --text-muted: #00b51b;
-  --text-subtle: #009a14;
+  --bg: #050506;
+  --bg-subtle: #0a0a0c;
+  --surface: #101012;
+  --surface-hover: #16161a;
+  --surface-raised: #1b1b20;
+  --surface-raised-hover: #222228;
+  --border: #26262c;
+  --border-strong: #3a3a43;
+  --chart-baseline: #2a2a30;
+  --dot-off: #33333a;
+  --text: #e8e8ea;
+  --text-muted: #a1a1aa;
+  --text-subtle: #71717a;
   --accent: #00ff41;
   --primary: #00ff41;
   --primary-hover: #00cc33;
-  --on-primary: #000000;
+  --on-primary: #050506;
   --positive: #00cc33;
   --negative: #ff0000;
   --buy-bg: #001a0a;
@@ -26,32 +26,35 @@
   --positive-halo: rgba(0, 255, 65, 0.2);
   --overlay-fast: #ffb454;
   --overlay-slow: #5ec8ff;
-  --signal-buy: #ffffff;
-  --signal-sell: #ff4fa3;
+  --signal-buy: #e8e8ea;
+  --signal-sell: #f87171;
+  --font-display: 'VT323', ui-monospace, monospace;
+  --font-ui: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: ui-monospace, 'Cascadia Code', 'SFMono-Regular', Menlo, monospace;
+  --warning: #f59e0b;
 }
+
 
 :root[data-theme='light'] {
   color-scheme: light;
 
-  --bg: #f0fff4;
-  --bg-subtle: #d4f7de;
-  --surface: #e8fff0;
-  --surface-hover: #d4f7de;
-  --surface-raised: #c2f3ca;
-  --surface-raised-hover: #b4efbc;
-  --border: #69e38a;
-  --border-strong: #4cc06a;
-  --chart-baseline: #9ef0ad;
-  --dot-off: #9ef0ad;
-  --text: #004d00;
-  --text-muted: #1f7a35;
-  --text-subtle: #2a7d3f;
-  --accent: #006b1b;
-  --primary: #008a2a;
+  --bg: #f7faf8;
+  --bg-subtle: #eef5f0;
+  --surface: #ffffff;
+  --surface-hover: #e8f1ea;
+  --surface-raised: #dcefe0;
+  --border: #c9ddcf;
+  --border-strong: #9fc7aa;
+  --text: #142018;
+  --text-muted: #4f6357;
+  --text-subtle: #6b7f72;
+  --accent: #FA7E42;
+  --primary: #FA7E42;
   --primary-hover: #006b20;
   --on-primary: #ffffff;
-  --positive: #006b1b;
-  --negative: #cc0000;
+  --positive: #067a3a;
+  --negative: #c81e1e;
+  --warning: #a16207;
   --buy-bg: #dff7e8;
   --sell-bg: #ffe6e6;
   --sell-text: #aa3300;
@@ -60,6 +63,10 @@
   --overlay-slow: #0b6fa8;
   --signal-buy: #003d00;
   --signal-sell: #b3126b;
+  --font-display: 'VT323', ui-monospace, monospace;
+  --font-ui: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: ui-monospace, 'Cascadia Code', 'SFMono-Regular', Menlo, monospace;
+  --warning: #f59e0b;
 }
 
 * {
@@ -70,6 +77,7 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
-  font-family: 'VT323', ui-monospace, monospace;
-  font-size: 1.2rem;
+  font-family: var(--font-ui);
+  font-size: 14px;
+  line-height: 1.5;
 }

@@ -8,6 +8,7 @@ const basePrices: Record<string, number> = {
 }
 
 const volatility: Record<Interval, number> = {
+  '5m': 0.001,
   '15m': 0.003,
   '1h': 0.006,
   '4h': 0.012,

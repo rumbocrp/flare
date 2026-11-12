@@ -11,7 +11,13 @@ import BotConfig from './pages/BotConfig'
 import BotRun from './pages/BotRun'
 import Stats from './pages/Stats'
 import Settings from './pages/Settings'
+import Backtest from './pages/Backtest'
+import {
+  isBacktestSnapshot,
+  type BacktestSnapshot,
+} from './backtest'
 
+const BACKTEST_KEY = 'lixtrd:last-backtest'
 const STRATEGY_KEY = 'lixtrd:strategy'
 const SETTINGS_KEY = 'lixtrd:settings'
 
@@ -28,6 +34,15 @@ function App() {
     SETTINGS_KEY,
     defaultSettings,
     isAppSettings,
+  )
+
+  const [lastBacktest, setLastBacktest] = useLocalStorageState<
+    BacktestSnapshot | null
+  >(
+    BACKTEST_KEY,
+    null,
+    (value): value is BacktestSnapshot | null =>
+      value === null || isBacktestSnapshot(value),
   )
 
   useTheme(settings.theme)
@@ -51,8 +66,19 @@ function App() {
             strategy={strategy}
           />
         )
+        case 'backtest':
+          return (
+            <Backtest
+              strategy={strategy}
+              onNavigate={setActivePage}
+              onSaveResult={setLastBacktest}
+          />
+        )
       case 'stats':
-        return <Stats />
+        return <Stats
+          backtest={lastBacktest}
+          onNavigate={setActivePage}
+        />
       case 'settings':
         return (
           <Settings
@@ -70,6 +96,8 @@ function App() {
       <main className="content">{renderPage()}</main>
     </div>
   )
+
+
 }
 
 export default App

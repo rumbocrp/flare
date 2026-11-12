@@ -1,28 +1,30 @@
 .table-wrap {
     overflow-x: auto;
     border: 1px solid var(--border);
-    border-radius: 12px;
+    border-radius: 8px;
     background: var(--surface);
 }
 
 .trades {
     width: 100%;
     border-collapse: collapse;
-    font-size: 0.9rem;
+    font-size: 12px;
     white-space: nowrap;
 }
 
 .trades th,
 .trades td {
-    padding: 12px 16px;
+    padding: 8px 12px;
     text-align: left;
     border-bottom: 1px solid var(--border);
 }
 
 .trades thead th {
-    font-size: 0.8rem;
+    font-size: 10px;
     font-weight: 600;
-    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-subtle);
     background: var(--bg-subtle);
 }
 
@@ -57,9 +59,15 @@
 }
 
 .side {
-    padding: 2px 10px;
-    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    height: 20px;
+    padding: 0 6px;
+    border-radius: 4px;
     font-size: 0.8rem;
+    font: 600 10px/1 var(--font-mono);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
 }
 
 .side--buy {

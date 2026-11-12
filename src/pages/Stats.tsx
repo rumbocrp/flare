@@ -4,17 +4,26 @@ import EquityChart from '../components/EquityChart'
 import MetricCard from '../components/MetricCard'
 import TradesTable from '../components/TradesTable'
 import { trades, tradePnl } from '../trades'
-import { computeEquityPoints, computeMetrics } from '../metrics'
+import { computeEquityPoints, computeMetrics, startingBalance } from '../metrics'
 import {
+  formatDateTime,
   formatMoney,
   formatOrDash,
   formatPercent,
   formatSignedMoney,
 } from '../format'
-import type { Tone } from '../types'
+import type { BacktestSnapshot } from '../backtest'
+import type { PageId, Tone } from '../types'
 import MarketSection from '../components/MarketSection'
 
+
 type TradeFilter = 'all' | 'wins' | 'losses'
+type TradeSource = 'sample' | 'backtest'
+
+type StatsProps = {
+  backtest: BacktestSnapshot | null
+  onNavigate: (page: PageId) => void
+}
 
 const filterOptions: { id: TradeFilter; label: string }[] = [
   { id: 'all', label: 'Todas' },
@@ -29,11 +38,23 @@ function toneOf(value: number | null, threshold = 0): Tone {
   return 'neutral'
 }
 
-function Stats() {
+function Stats({ backtest, onNavigate }: StatsProps) {
   const [filter, setFilter] = useState<TradeFilter>('all')
 
-  const metrics = computeMetrics(trades)
-  const equityPoints = computeEquityPoints(trades)
+  const [source, setSource] = useState<TradeSource>(
+    backtest ? 'backtest' : 'sample',
+  )
+
+  const activeSource: TradeSource = backtest ? source : 'sample'
+  const activeTrades =
+    activeSource === 'backtest' && backtest ? backtest.trades : trades
+  const initialBalance =
+    activeSource === 'backtest' && backtest
+      ? backtest.summary.initialBalance
+      : startingBalance
+
+  const metrics = computeMetrics(activeTrades, initialBalance)
+  const equityPoints = computeEquityPoints(activeTrades, initialBalance)
 
   const hasDrawdown = metrics.maxDrawdown > 0
   const drawdownText = hasDrawdown
@@ -43,7 +64,7 @@ function Stats() {
     ? `${formatPercent(metrics.maxDrawdownPct, 2)} del máximo alcanzado`
     : 'Sin caídas'
 
-  const visibleTrades = trades.filter((trade) => {
+  const visibleTrades = activeTrades.filter((trade) => {
     if (filter === 'wins') return tradePnl(trade) > 0
     if (filter === 'losses') return tradePnl(trade) < 0
     return true
@@ -123,10 +144,6 @@ function Stats() {
           />
         </div>
 
-        <p className="disclaimer">
-          Calculados con las operaciones de ejemplo. Con tan pocas operaciones,
-          estos números no son confiables.
-        </p>
       </section>
 
       <section className="section">
@@ -156,6 +173,53 @@ function Stats() {
 
         <TradesTable trades={visibleTrades} />
       </section>
+      {backtest && (
+        <section className="readout">
+          <p>
+            <strong>Último backtest:</strong> {backtest.config.pair} ·{' '}
+            {backtest.candles.count} velas ·{' '}
+            {formatDateTime(backtest.createdAt)} UTC ·{' '}
+            {backtest.trades.length} operaciones
+          </p>
+          <div className="segmented" role="group" aria-label="Fuente de datos">
+            <button
+              type="button"
+              className={`segmented__option ${
+                activeSource === 'backtest'
+                  ? 'segmented__option--active'
+                  : ''
+              }`}
+              aria-pressed={activeSource === 'backtest'}
+              onClick={() => setSource('backtest')}
+            >
+              Backtest
+            </button>
+            <button
+              type="button"
+              className={`segmented__option ${
+                activeSource === 'sample' ? 'segmented__option--active' : ''
+              }`}
+              aria-pressed={activeSource === 'sample'}
+              onClick={() => setSource('sample')}
+            >
+              Ejemplo
+            </button>
+            <button
+              type="button"
+              className="btn"
+              onClick={() => onNavigate('backtest')}
+            >
+              Abrir backtest
+            </button>
+          </div>
+        </section>
+      )}
+
+      <p className="disclaimer">
+        {activeSource === 'backtest'
+          ? 'Resultados del último backtest guardado. No incluyen liquidez, funding ni spread variable.'
+          : 'Calculados con las operaciones de ejemplo. Con tan pocas operaciones, estos números no son confiables.'}
+      </p>
 
       <MarketSection />
     </div>

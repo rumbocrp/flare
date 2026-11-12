@@ -27,6 +27,7 @@
 .page__header h1 {
   margin: 0 0 4px;
   font-size: 1.5rem;
+  font-family: var(--font-display);
 }
 
 .page__header p {
@@ -35,12 +36,16 @@
 }
 
 .badge {
-  padding: 4px 12px;
-  border-radius: 999px;
+  min-height: 20px;
+  padding: 0 6px;
+  border-radius: 4px;
   background: var(--surface-raised);
   color: var(--accent);
+  font: 600 10px/1 var(--font-mono);
   font-size: 0.85rem;
   white-space: nowrap;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 /* Tarjetas del Panel */
@@ -53,20 +58,25 @@
 .card {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 20px;
+  gap: 6px;
+  padding: 16px;
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: 8px;
   background: var(--surface);
   color: var(--text);
 }
 
 .card__label {
+  font: 600 10px/1 var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.08rem;
   font-size: 0.85rem;
-  color: var(--text-muted);
+  color: var(--text-subtle);
 }
 
 .card__value {
+  font: 700 1.25rem/1.1 var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-size: 1.6rem;
 }
 
@@ -96,17 +106,20 @@
 }
 
 .btn {
-    padding: 10px 20px;
-    border: 1px solid var(--border-strong);
-    border-radius: 8px;
-    background: var(--surface-raised);
-    color: var(--text);
-    font: Redaction 35;
-    cursor: pointer;
+  min-height: 30px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text-muted);
+  font: 500 0.75rem/1 var(--font-ui);
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
 }
 
 .btn:hover:not(:disabled) {
-    background: var(--surface-raised-hover);
+  background: var(--surface-hover);
+  color: var(--text);
+  border-color: var(--border-strong);
 }
 
 .btn:disabled {
@@ -116,14 +129,10 @@
 
 /* Botón principal con estilo */
 .btn--primary {
-  background: var(--primary);      /* Verde Matrix */
-  color: var(--on-primary);        /* Negro sobre verde */
-  border: 1px solid var(--primary); /* Borde verde */
-  border-radius: var(--radius);
+  background: var(--primary);
+  color: var(--on-primary);
   border-color: var(--primary);
-  font-weight: bold;
 }
-
 
 .btn--primary:hover:not(:disabled) {
     background: var(--primary-hover);
@@ -163,7 +172,10 @@
 }
 
 .field__label {
-  font-size: 0.9rem;
+  font: 600 10px/1 var(--font-ui);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-subtle);
 }
 
 .field__control {
@@ -175,19 +187,23 @@
 .field__control input,
 .field__control select {
   flex: 1;
+  min-height: 32px;
   min-width: 0;
-  padding: 10px 12px;
+  padding: 6px 8px;
   border: 1px solid var(--border-strong);
-  border-radius: 8px;
-  background: var(--bg);
+  border-radius: 4px;
+  background: var(--surface);
   color: var(--text);
   font: inherit;
+  font-size: 12px;
 }
 
 .field__control input:focus,
 .field__control select:focus {
-  outline: 2px solid var(--primary);
+  outline: none;
   outline-offset: 1px;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
 }
 
 .field__control input[aria-invalid='true'] {
@@ -242,36 +258,45 @@
 }
 
 /* Selector segmentado: grupo de botones donde solo uno está activo */
+/* Selector segmentado: grupo de botones donde solo uno está activo */
+/* Selector segmentado: grupo de botones donde solo uno está activo */
 .segmented {
   display: inline-flex;
-  gap: 4px;
-  padding: 4px;
+  flex-wrap: wrap;
+  gap: 2px;
+  max-width: 100%;
+  padding: 2px;
   border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--bg-subtle);
+  border-radius: 6px;
+  background: var(--surface);
 }
 
 .segmented__option {
-  padding: 8px 16px;
-  border: none;
-  border-radius: 8px;
+  min-height: 26px;
+  padding: 4px 10px;
+  border: 1px solid transparent;
+  border-radius: 4px;
   background: transparent;
   color: var(--text-muted);
-  font: inherit;
+  font: 500 0.75rem/1 var(--font-ui);
+  text-align: center;
+  white-space: nowrap;
   cursor: pointer;
 }
 
-.segmented__option:hover {
+.segmented__option:hover:not(:disabled) {
+  background: var(--surface-hover);
   color: var(--text);
 }
 
 .segmented__option--active {
-  background: var(--primary);
-  color: var(--primary-fg);
+  background: var(--surface-raised);
+  color: var(--text);
+  border-color: var(--border-strong);
 }
 
 .card__hint {
-    font-size: 0.8rem;
+    font-size: 11px;
     color: var(--text-subtle);
 }
 
@@ -280,8 +305,9 @@
 }
 
 .btn--danger {
-    border-color: var(--negative);
-    color: var(--negative);
+  background: transparent;
+  color: var(--negative);
+  border-color: var(--negative);
 }
 
 .btn--danger:hover:not(:disabled) {
@@ -292,20 +318,6 @@
 .segmented__option:disabled {
     opacity: 0.4;
     cursor: not-allowed;
-}
-
-.segmented__option--active {
-    background-color: #00FF41;
-    border: 1px solid #003B00;
-    border-radius: 6px;
-    padding: 6px 12px;
-    font-weight: 500;
-}
-
-.segmented__option {
-    text-align: center;
-    border-radius: var(--radius);
-    font-size: 14px;
 }
 
 .segmented__option--active {
@@ -368,6 +380,11 @@
   position: absolute;
   left: 50%;
   transform: translateX(-50%);
+}
+
+.page__header h1,
+.sidebar__brand {
+  font-family: var(--font-display);
 }
 
 .line-top { top: 0; }

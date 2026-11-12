@@ -28,7 +28,7 @@ function average(values: number[]): number | null {
 }
 
 export function computeMetrics(
-  trades: Trade[], 
+  trades: Trade[],
   initialBalance = startingBalance,
 ): Metrics {
   const ordered = [...trades].sort((a, b) => a.time.localeCompare(b.time))
@@ -40,8 +40,8 @@ export function computeMetrics(
   const grossProfit = sum(winResults)
   const grossLoss = Math.abs(sum(lossResults))
 
-  let balance = startingBalance
-  let peak = startingBalance
+  let balance = initialBalance
+  let peak = initialBalance
   let maxDrawdown = 0
   let maxDrawdownPct = 0
 
@@ -81,8 +81,8 @@ export function computeEquityPoints(
 ): ChartPoint[] {
   const ordered = [...trades].sort((a, b) => a.time.localeCompare(b.time))
 
-  const points: ChartPoint[] = [{ label: 'Start', value: startingBalance }]
-  let balance = startingBalance
+  const points: ChartPoint[] = [{ label: 'Start', value: initialBalance }]
+  let balance = initialBalance
 
   for (const trade of ordered) {
     balance = Math.round((balance + tradePnl(trade)) * 100) / 100
