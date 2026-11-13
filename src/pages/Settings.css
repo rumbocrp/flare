@@ -1,39 +1,38 @@
 .setting {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    margin-bottom: 12px;
-    padding: 16px;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    background: var(--surface);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
 }
 
 .setting__text {
-    flex: 1 1 280px;
-    max-width: 480px;
+  flex: 1 1 260px;
+  max-width: 520px;
 }
 
 .setting__title {
-    margin: 0 0 4px;
-    font: 600 0.875rem/1.2 var(--font-ui);
-    letter-spacing: 0.02em;
-    color: var(--text);
+  margin: 0 0 3px;
+  color: var(--text);
+  font: 600 13px/1.25 var(--font-ui);
+  letter-spacing: 0.01em;
 }
 
 .setting__desc {
-    margin: 0;
-    font: 400 0.75rem/1.4 var(--font-ui);
-    color: var(--text-muted);
+  color: var(--text-muted);
+  font: 400 11.5px/1.45 var(--font-ui);
 }
 
 .setting__confirm {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 12px;
-    font: 400 0.75rem/1.4 var(--font-ui);
-    color: var(--text-muted);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font: 400 11.5px/1.45 var(--font-ui);
 }

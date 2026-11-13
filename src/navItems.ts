@@ -14,3 +14,23 @@ export const navItems: NavItem[] = [
   { id: 'stats', label: 'Estadísticas', icon: '◔' },
   { id: 'settings', label: 'Ajustes', icon: '☰' },
 ]
+
+export const primaryNavIds: readonly PageId[] = [
+  'dashboard',
+  'bot-config',
+  'bot-run',
+  'backtest',
+  'stats',
+]
+
+export const primaryNavItems: NavItem[] = primaryNavIds
+  .map((id) => navItems.find((item) => item.id === id))
+  .filter((item): item is NavItem => item !== undefined)
+
+export const overflowNavItems: NavItem[] = navItems.filter(
+  (item) => !primaryNavIds.includes(item.id),
+)
+
+export function getNavLabel(id: PageId): string {
+  return navItems.find((item) => item.id === id)?.label ?? id
+}

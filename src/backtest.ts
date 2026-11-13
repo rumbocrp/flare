@@ -273,7 +273,7 @@ export function runBacktest(
     rawPrice: number,
     time: number,
     reason: ExitReason,
-  ): OpenPosition | null {
+  ): void {
     if (!position) return
 
     const closeSide: TradeSide = position.side === 'buy' ? 'sell' : 'buy'
@@ -326,7 +326,6 @@ export function runBacktest(
     }
 
     position = null
-    return null
   }
 
   function openPosition(
@@ -355,9 +354,8 @@ export function runBacktest(
       quantity,
       notional,
       entryFee: notional * (settings.commissionPct / 100),
-      stopPrice: entryPrice * (1 - direction * (strategy.stopLoss / 100)),
-      targetPrice:
-        entryPrice * (1 + direction * (strategy.takeProfit / 100)),
+      stopPrice: roundMoney(entryPrice * (1 - direction * (strategy.stopLoss / 100))),
+      targetPrice: roundMoney(entryPrice * (1 + direction * (strategy.takeProfit / 100))),
     }
   }
 
@@ -411,7 +409,7 @@ export function runBacktest(
         } else {
           pending = { side: signal.side, closeFirst: false }
         }
-      } else if (position.side !== signal.side) {
+      } else if ((position as OpenPosition).side !== signal.side) {
         pending = { side: signal.side, closeFirst: true }
       } else {
         skippedSignals++
