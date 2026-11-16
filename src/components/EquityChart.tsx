@@ -3,6 +3,7 @@ import './EquityChart.css'
 import { useElementWidth } from '../hooks/useElementWidth'
 import { niceTicks } from '../chart'
 import { formatMoney, formatMoneyWhole, formatSignedMoney } from '../format'
+import { useI18n } from '../i18n'
 import type { ChartPoint } from '../types'
 
 type EquityChartProps = {
@@ -19,6 +20,7 @@ function changeClass(change: number): string {
 }
 
 function EquityChart({ points }: EquityChartProps) {
+  const { t } = useI18n()
   const [containerRef, width] = useElementWidth<HTMLDivElement>()
   const [activeIndex, setActiveIndex] = useState<number | null>(null)
 
@@ -26,7 +28,7 @@ function EquityChart({ points }: EquityChartProps) {
     return (
       <div className="chart" ref={containerRef}>
         <p className="chart__empty">
-          Se necesitan al menos 2 puntos para dibujar el gráfico.
+          {t('chart.needPoints')}
         </p>
       </div>
     )
@@ -80,7 +82,11 @@ function EquityChart({ points }: EquityChartProps) {
           height={HEIGHT}
           viewBox={`0 0 ${width} ${HEIGHT}`}
           role="img"
-          aria-label={`Curva del balance: de ${formatMoney(points[0].value)} a ${formatMoney(points[lastIndex].value)} en ${lastIndex} operaciones`}
+          aria-label={t('chart.equityAria', {
+            from: formatMoney(points[0].value),
+            to: formatMoney(points[lastIndex].value),
+            count: lastIndex,
+          })}
           onPointerMove={handlePointer}
           onPointerDown={handlePointer}
           onPointerLeave={() => setActiveIndex(null)}

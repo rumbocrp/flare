@@ -1,0 +1,113 @@
+import type { ComponentProps } from 'react'
+import { cn } from '@/lib/utils'
+
+function Table({ className, ...props }: ComponentProps<'table'>) {
+  return (
+    <div
+      data-slot="table-container"
+      className="relative w-full overflow-x-auto rounded-md border border-border bg-card shadow-[var(--shadow-card)]"
+    >
+      <table
+        data-slot="table"
+        className={cn(
+          'w-full caption-bottom border-collapse text-left text-xs tabular-nums',
+          className,
+        )}
+        {...props}
+      />
+    </div>
+  )
+}
+
+function TableHeader({ className, ...props }: ComponentProps<'thead'>) {
+  return (
+    <thead
+      data-slot="table-header"
+      className={cn('bg-secondary/50 [&_tr]:border-b [&_tr]:border-[var(--border-subtle)]', className)}
+      {...props}
+    />
+  )
+}
+
+function TableBody({ className, ...props }: ComponentProps<'tbody'>) {
+  return (
+    <tbody
+      data-slot="table-body"
+      className={cn('[&_tr:last-child]:border-0', className)}
+      {...props}
+    />
+  )
+}
+
+function TableFooter({ className, ...props }: ComponentProps<'tfoot'>) {
+  return (
+    <tfoot
+      data-slot="table-footer"
+      className={cn(
+        'border-t border-[var(--border-subtle)] bg-secondary/35 font-medium [&>tr]:last:border-b-0',
+        className,
+      )}
+      {...props}
+    />
+  )
+}
+
+function TableRow({ className, ...props }: ComponentProps<'tr'>) {
+  return (
+    <tr
+      data-slot="table-row"
+      className={cn(
+        'border-b border-[var(--border-subtle)] transition-colors hover:bg-accent/45 data-[state=selected]:bg-accent',
+        className,
+      )}
+      {...props}
+    />
+  )
+}
+
+function TableHead({ className, ...props }: ComponentProps<'th'>) {
+  return (
+    <th
+      data-slot="table-head"
+      className={cn(
+        'h-8 px-2.5 text-left align-middle font-mono text-[10px] font-semibold uppercase tracking-[0.06em] whitespace-nowrap text-muted-foreground',
+        className,
+      )}
+      {...props}
+    />
+  )
+}
+
+function TableCell({ className, ...props }: ComponentProps<'td'>) {
+  return (
+    <td
+      data-slot="table-cell"
+      className={cn(
+        'px-2.5 py-2 align-middle font-mono text-[11.5px] whitespace-nowrap text-foreground',
+        className,
+      )}
+      {...props}
+    />
+  )
+}
+
+function TableCaption({ className, ...props }: ComponentProps<'caption'>) {
+  return (
+    <caption
+      data-slot="table-caption"
+      className={cn('mt-2 text-xs text-muted-foreground', className)}
+      {...props}
+    />
+  )
+}
+
+export {
+  Table,
+  TableHeader,
+  TableBody,
+  TableFooter,
+  TableHead,
+  TableRow,
+  TableCell,
+  TableCaption,
+}

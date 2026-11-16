@@ -1,78 +1,104 @@
-import './TradesTable.css'
-import { sideLabels, tradePnl } from '../trades'
-import { formatMoney, formatPrice, formatSignedMoney } from '../format'
-import type { Trade } from '../types'
+import { Badge } from '@/components/ui/badge'
+import { Card } from '@/components/ui/card'
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table'
+import {
+  formatMoney,
+  formatPrice,
+  formatSignedMoney,
+} from '@/format'
+import { useI18n } from '@/i18n'
+import { cn } from '@/lib/utils'
+import { tradePnl } from '@/trades'
+import type { Trade } from '@/types'
 
 type TradesTableProps = {
   trades: Trade[]
 }
 
-function pnlClass(pnl: number): string {
-  if (pnl > 0) return 'trades__pnl--positive'
-  if (pnl < 0) return 'trades__pnl--negative'
-  return ''
-}
-
 function TradesTable({ trades }: TradesTableProps) {
-  const total = trades.reduce((sum, trade) => sum + tradePnl(trade), 0)
+  const { t } = useI18n()
+
+  if (trades.length === 0) {
+    return (
+      <Card className="px-4 py-6 text-center text-xs text-muted-foreground">
+        {t('table.empty')}
+      </Card>
+    )
+  }
+
+  const totalPnl = trades.reduce((sum, trade) => sum + tradePnl(trade), 0)
 
   return (
-    <div className='table-wrap'>
-      <table className='trades'>
-        <thead>
-          <tr>
-            <th scope='col'>Hour</th>
-            <th scope='col'>Pair</th>
-            <th scope='col'>Side</th>
-            <th scope='col' className='trades__num'>Entry</th>
-            <th scope='col' className='trades__num'>Exit</th>
-            <th scope='col' className='trades__num'>Size</th>
-            <th scope='col' className='trades__num'>Result</th>
-          </tr>
-        </thead>
-
-        <tbody>
-          {trades.length === 0 && (
-            <tr>
-              <td colSpan={7} className='trades__empty'>
-                No operations to show.
-              </td>
-            </tr>
-          )}
-
-          {trades.map((trade) => {
-            const pnl = tradePnl(trade)
-
-            return (
-              <tr key={trade.id}>
-                <td>{trade.time}</td>
-                <td>{trade.pair}</td>
-                <td>
-                  <span className={`side side--${trade.side}`}>
-                    {sideLabels[trade.side]}
-                  </span>
-                </td>
-                <td className='trades__num'>{formatPrice(trade.entryPrice)}</td>
-                <td className='trades__num'>{formatPrice(trade.exitPrice)}</td>
-                <td className='trades__num'>{formatMoney(trade.size)}</td>
-                <td className={`trades__num ${pnlClass(pnl)}`}>
-                  {formatSignedMoney(pnl)}
-                </td>
-              </tr>
-            )
-          })}
-        </tbody>
-
-        <tfoot>
-          <tr>
-            <th scope='row' colSpan={6}>Total</th>
-            <td className={`trades__num ${pnlClass(total)}`}>
-              {formatSignedMoney(total)}
-            </td>
-          </tr>
-        </tfoot>
-      </table>
-    </div>
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>{t('table.time')}</TableHead>
+          <TableHead>{t('table.pair')}</TableHead>
+          <TableHead>{t('table.side')}</TableHead>
+          <TableHead className="text-right">{t('table.entry')}</TableHead>
+          <TableHead className="text-right">{t('table.exit')}</TableHead>
+          <TableHead className="text-right">{t('table.size')}</TableHead>
+          <TableHead className="text-right">{t('table.result')}</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {trades.map((trade) => {
+          const pnl = tradePnl(trade)
+          return (
+            <TableRow key={trade.id}>
+              <TableCell className="text-muted-foreground">{trade.time}</TableCell>
+              <TableCell className="font-semibold text-foreground">{trade.pair}</TableCell>
+              <TableCell>
+                <Badge variant={trade.side === 'buy' ? 'positive' : 'negative'}>
+                  {trade.side === 'buy' ? 'BUY' : 'SELL'}
+                </Badge>
+              </TableCell>
+              <TableCell className="text-right">{formatPrice(trade.entryPrice)}</TableCell>
+              <TableCell className="text-right">{formatPrice(trade.exitPrice)}</TableCell>
+              <TableCell className="text-right text-muted-foreground">
+                {formatMoney(trade.size)}
+              </TableCell>
+              <TableCell
+                className={cn(
+                  'text-right font-semibold',
+                  pnl > 0
+                    ? 'text-[var(--positive)]'
+                    : pnl < 0
+                      ? 'text-[var(--negative)]'
+                      : 'text-foreground',
+                )}
+              >
+                {formatSignedMoney(pnl)}
+              </TableCell>
+            </TableRow>
+          )
+        })}
+        <TableRow className="bg-secondary/45 font-semibold hover:bg-secondary/45">
+          <TableCell colSpan={6} className="text-right font-mono text-[10.5px] uppercase tracking-wider text-muted-foreground">
+            {t('table.total')}
+          </TableCell>
+          <TableCell
+            className={cn(
+              'text-right',
+              totalPnl > 0
+                ? 'text-[var(--positive)]'
+                : totalPnl < 0
+                  ? 'text-[var(--negative)]'
+                  : 'text-foreground',
+            )}
+          >
+            {formatSignedMoney(totalPnl)}
+          </TableCell>
+        </TableRow>
+      </TableBody>
+    </Table>
   )
 }
 

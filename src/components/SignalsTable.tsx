@@ -1,51 +1,78 @@
-import './TradesTable.css'
-import { sideLabels } from '../trades'
-import { formatDateTime, formatPrice } from '../format'
-import type { Signal } from '../types'
+import { Badge } from '@/components/ui/badge'
+import { Card } from '@/components/ui/card'
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table'
+import { formatDateTime, formatPrice } from '@/format'
+import { useI18n, type Translate } from '@/i18n'
+import type { Signal, SignalParams } from '@/types'
 
 type SignalsTableProps = {
   signals: Signal[]
+  params?: SignalParams
 }
 
-function SignalsTable({ signals }: SignalsTableProps) {
+function formatReason(
+  signal: Signal,
+  params: SignalParams | undefined,
+  t: Translate,
+): string {
+  if (!params) return signal.reason
+
+  const key =
+    signal.side === 'buy' ? 'signals.crossAbove' : 'signals.crossBelow'
+  return t(key, {
+    average: params.average.toUpperCase(),
+    fast: params.fastPeriod,
+    slow: params.slowPeriod,
+  })
+}
+
+function SignalsTable({ signals, params }: SignalsTableProps) {
+  const { locale, t } = useI18n()
+
+  if (signals.length === 0) {
+    return (
+      <Card className="px-4 py-5 text-center text-xs text-muted-foreground">
+        {t('signals.empty')}
+      </Card>
+    )
+  }
+
   return (
-    <div className="table-wrap">
-      <table className="trades">
-        <thead>
-          <tr>
-            <th scope="col">Vela (UTC)</th>
-            <th scope="col">Lado</th>
-            <th scope="col" className="trades__num">
-              Precio de referencia
-            </th>
-            <th scope="col">Motivo</th>
-          </tr>
-        </thead>
-
-        <tbody>
-          {signals.length === 0 && (
-            <tr>
-              <td colSpan={4} className="trades__empty">
-                Esta estrategia no generó señales con estos datos.
-              </td>
-            </tr>
-          )}
-
-          {signals.map((signal) => (
-            <tr key={`${signal.index}-${signal.side}`}>
-              <td>{formatDateTime(signal.time)}</td>
-              <td>
-                <span className={`side side--${signal.side}`}>
-                  {sideLabels[signal.side]}
-                </span>
-              </td>
-              <td className="trades__num">{formatPrice(signal.price)}</td>
-              <td>{signal.reason}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>{t('signals.candle')}</TableHead>
+          <TableHead>{t('signals.side')}</TableHead>
+          <TableHead className="text-right">{t('signals.price')}</TableHead>
+          <TableHead>{t('signals.reason')}</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {signals.map((signal) => (
+          <TableRow key={`${signal.time}-${signal.side}`}>
+            <TableCell className="text-muted-foreground">
+              {formatDateTime(signal.time, locale)}
+            </TableCell>
+            <TableCell>
+              <Badge variant={signal.side === 'buy' ? 'positive' : 'negative'}>
+                {signal.side === 'buy' ? t('chart.buy') : t('chart.sell')}
+              </Badge>
+            </TableCell>
+            <TableCell className="text-right">{formatPrice(signal.price)}</TableCell>
+            <TableCell className="text-muted-foreground">
+              {formatReason(signal, params, t)}
+            </TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
   )
 }
 

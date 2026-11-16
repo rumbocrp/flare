@@ -1,35 +1,59 @@
 import { useMemo, useState, type ChangeEvent, type FormEvent } from 'react'
-import './Backtest.css'
-import PageHeader from '../components/PageHeader'
-import NumberField from '../components/NumberField'
-import EquityChart from '../components/EquityChart'
-import MetricCard from '../components/MetricCard'
-import TradesTable from '../components/TradesTable'
-import { useCandles } from '../hooks/useCandles'
-import { marketDataSource } from '../market'
-import { availablePairs } from '../strategy'
 import {
-  averageOptions,
-  defaultSignalParams,
-  fastOptions,
-  slowOptions,
-} from '../signals'
+  ArrowRight,
+  BarChart3,
+  Play,
+  RefreshCw,
+} from 'lucide-react'
 import {
   createBacktestSnapshot,
-  exitReasonLabels,
   runBacktest,
   type BacktestConfig,
   type BacktestResult,
   type BacktestSnapshot,
-} from '../backtest'
-import { computeMetrics } from '../metrics'
+} from '@/backtest'
+import EquityChart from '@/components/EquityChart'
+import MetricCard from '@/components/MetricCard'
+import NumberField from '@/components/NumberField'
+import PageHeader from '@/components/PageHeader'
+import TradesTable from '@/components/TradesTable'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import {
+  Card,
+  CardContent,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card'
+import { Checkbox } from '@/components/ui/checkbox'
+import { Label } from '@/components/ui/label'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import {
   formatDateTime,
   formatMoney,
   formatOrDash,
   formatPercent,
   formatSignedMoney,
-} from '../format'
+} from '@/format'
+import { useCandles } from '@/hooks/useCandles'
+import { useI18n, type Translate, type TranslationKey } from '@/i18n'
+import { cn } from '@/lib/utils'
+import { marketDataSource } from '@/market'
+import { computeMetrics } from '@/metrics'
+import {
+  averageOptions,
+  defaultSignalParams,
+  fastOptions,
+  slowOptions,
+} from '@/signals'
+import { availablePairs } from '@/strategy'
 import type {
   AverageKind,
   ChartPoint,
@@ -39,15 +63,15 @@ import type {
   SignalParams,
   Strategy,
   Tone,
-} from '../types'
+} from '@/types'
 
 const CANDLE_LIMITS = [200, 500, 1000]
 
-const intervalOptions: { id: Interval; label: string }[] = [
-  { id: '15m', label: '15 min' },
-  { id: '1h', label: '1 h' },
-  { id: '4h', label: '4 h' },
-  { id: '1d', label: '1 día' },
+const intervalOptions: { id: Interval; labelKey: TranslationKey }[] = [
+  { id: '15m', labelKey: 'market.interval15m' },
+  { id: '1h', labelKey: 'market.interval1h' },
+  { id: '4h', labelKey: 'market.interval4h' },
+  { id: '1d', labelKey: 'market.interval1d' },
 ]
 
 type FormValues = {
@@ -78,27 +102,28 @@ function numberError(
   text: string,
   min: number,
   max: number,
+  t: Translate,
 ): string | undefined {
   const value = Number(text)
 
   if (text.trim() === '' || Number.isNaN(value)) {
-    return 'Escribe un número.'
+    return t('validation.number')
   }
   if (value < min || value > max) {
-    return `Debe estar entre ${min} y ${max}.`
+    return t('validation.range', { min, max })
   }
   return undefined
 }
 
-function validate(values: FormValues): FormErrors {
+function validate(values: FormValues, t: Translate): FormErrors {
   return {
-    initialBalance: numberError(values.initialBalance, 1, 1_000_000),
-    commissionPct: numberError(values.commissionPct, 0, 5),
-    slippagePct: numberError(values.slippagePct, 0, 5),
-    positionSize: numberError(values.positionSize, 0.1, 100),
-    stopLoss: numberError(values.stopLoss, 0.1, 50),
-    takeProfit: numberError(values.takeProfit, 0.1, 100),
-    maxDailyRisk: numberError(values.maxDailyRisk, 0.1, 100),
+    initialBalance: numberError(values.initialBalance, 1, 1_000_000, t),
+    commissionPct: numberError(values.commissionPct, 0, 5, t),
+    slippagePct: numberError(values.slippagePct, 0, 5, t),
+    positionSize: numberError(values.positionSize, 0.1, 100, t),
+    stopLoss: numberError(values.stopLoss, 0.1, 50, t),
+    takeProfit: numberError(values.takeProfit, 0.1, 100, t),
+    maxDailyRisk: numberError(values.maxDailyRisk, 0.1, 100, t),
   }
 }
 
@@ -116,6 +141,7 @@ type BacktestProps = {
 }
 
 function Backtest({ strategy, onNavigate, onSaveResult }: BacktestProps) {
+  const { locale, t } = useI18n()
   const [pair, setPair] = useState(strategy.pair)
   const [interval, setInterval] = useState<Interval>('1h')
   const [limit, setLimit] = useState(500)
@@ -136,7 +162,7 @@ function Backtest({ strategy, onNavigate, onSaveResult }: BacktestProps) {
     reloadKey,
   )
 
-  const errors = validate(values)
+  const errors = validate(values, t)
   const hasErrors = Object.values(errors).some(
     (message) => message !== undefined,
   )
@@ -153,11 +179,11 @@ function Backtest({ strategy, onNavigate, onSaveResult }: BacktestProps) {
     () =>
       result
         ? result.equity.map((point) => ({
-            label: formatDateTime(point.time),
+            label: formatDateTime(point.time, locale),
             value: point.value,
           }))
         : [],
-    [result],
+    [result, locale],
   )
 
   const exitCounts = useMemo(() => {
@@ -181,12 +207,12 @@ function Backtest({ strategy, onNavigate, onSaveResult }: BacktestProps) {
     event?.preventDefault()
 
     if (state.status !== 'success') {
-      setRunError('Espera a que las velas terminen de cargar.')
+      setRunError(t('backtest.waitForCandles'))
       return
     }
 
     if (hasErrors) {
-      setRunError('Revisa los campos marcados en rojo.')
+      setRunError(t('backtest.fixFields'))
       return
     }
 
@@ -214,440 +240,485 @@ function Backtest({ strategy, onNavigate, onSaveResult }: BacktestProps) {
       onSaveResult(createBacktestSnapshot(next))
     } catch (error) {
       setRunError(
-        error instanceof Error
-          ? error.message
-          : 'No se pudo ejecutar el backtest.',
+        error instanceof Error ? error.message : t('backtest.fixFields'),
       )
     }
   }
 
-  const lastConfig = result?.config
-
   return (
-    <div className="page">
+    <div className="flex flex-col gap-4">
       <PageHeader
-        title="Backtest"
-        subtitle="Simula la estrategia vela por vela con comisiones, stop loss y take profit."
+        title={t('backtest.title')}
+        actions={
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => onNavigate('stats')}
+          >
+            <BarChart3 className="size-3.5" />
+            <span>{t('backtest.viewStats')}</span>
+          </Button>
+        }
       />
 
-      <form className="form" onSubmit={handleRun} noValidate>
-        <section className="section">
-          <div className="section__header">
-            <h2>Datos</h2>
-          </div>
+      <form onSubmit={handleRun} noValidate className="flex flex-col gap-4">
+        <Card>
+          <CardHeader>
+            <CardTitle>{t('backtest.data')}</CardTitle>
+            <Badge variant="outline">
+              {pair} · {interval} · {limit}
+            </Badge>
+          </CardHeader>
 
-          <div className="backtest__grid">
-            <div className="field">
-              <label className="field__label" htmlFor="bt-pair">
-                Par
-              </label>
-              <div className="field__control">
-                <select
-                  id="bt-pair"
-                  value={pair}
-                  onChange={(event) => setPair(event.target.value)}
-                >
-                  {availablePairs.map((option) => (
-                    <option key={option} value={option}>
-                      {option}
-                    </option>
-                  ))}
-                </select>
+          <CardContent className="flex flex-col gap-3">
+            <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-3">
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="bt-pair">{t('backtest.pair')}</Label>
+                <Select value={pair} onValueChange={setPair}>
+                  <SelectTrigger id="bt-pair">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {availablePairs.map((option) => (
+                      <SelectItem key={option} value={option}>
+                        {option}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <span className="text-[11px] text-[var(--text-subtle)]">
+                  {t('backtest.pairHint')}
+                </span>
               </div>
-              <p className="field__help">Mercado que se va a simular.</p>
-            </div>
 
-            <div className="field">
-              <label className="field__label" htmlFor="bt-interval">
-                Temporalidad
-              </label>
-              <div className="field__control">
-                <select
-                  id="bt-interval"
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="bt-interval">{t('backtest.timeframe')}</Label>
+                <Select
                   value={interval}
-                  onChange={(event) =>
-                    setInterval(event.target.value as Interval)
-                  }
+                  onValueChange={(val) => setInterval(val as Interval)}
                 >
-                  {intervalOptions.map((option) => (
-                    <option key={option.id} value={option.id}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
+                  <SelectTrigger id="bt-interval">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {intervalOptions.map((option) => (
+                      <SelectItem key={option.id} value={option.id}>
+                        {t(option.labelKey)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <span className="text-[11px] text-[var(--text-subtle)]">
+                  {t('backtest.timeframeHint')}
+                </span>
               </div>
-              <p className="field__help">
-                No se ofrece 5m hasta corregir `market/intervals.ts`.
-              </p>
+
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="bt-limit">{t('backtest.candles')}</Label>
+                <Select
+                  value={String(limit)}
+                  onValueChange={(val) => setLimit(Number(val))}
+                >
+                  <SelectTrigger id="bt-limit">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {CANDLE_LIMITS.map((option) => (
+                      <SelectItem key={option} value={String(option)}>
+                        {option}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <span className="text-[11px] text-[var(--text-subtle)]">
+                  {t('backtest.candlesHint')}
+                </span>
+              </div>
             </div>
 
-            <div className="field">
-              <label className="field__label" htmlFor="bt-limit">
-                Velas
-              </label>
-              <div className="field__control">
-                <select
-                  id="bt-limit"
-                  value={limit}
-                  onChange={(event) => setLimit(Number(event.target.value))}
-                >
-                  {CANDLE_LIMITS.map((option) => (
-                    <option key={option} value={option}>
-                      {option}
-                    </option>
-                  ))}
-                </select>
+            {state.status === 'loading' && (
+              <div className="rounded-sm border border-border bg-secondary/35 px-3 py-2 font-mono text-xs text-muted-foreground" role="status">
+                {t('backtest.loadingCandles')}
               </div>
-              <p className="field__help">
-                Más velas = más historia y más tiempo de cálculo.
-              </p>
-            </div>
-          </div>
+            )}
 
-          {state.status === 'loading' && (
-            <p className="readout" role="status">
-              Cargando velas…
-            </p>
-          )}
+            {state.status === 'error' && (
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-sm border border-[var(--negative)]/40 bg-[var(--negative-soft)] px-3 py-2 text-xs text-[var(--negative)]" role="alert">
+                <span>{t('backtest.loadError', { message: state.message })}</span>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="xs"
+                  onClick={() => setReloadKey((k) => k + 1)}
+                >
+                  <RefreshCw className="size-3" />
+                  <span>{t('backtest.retry')}</span>
+                </Button>
+              </div>
+            )}
 
-          {state.status === 'error' && (
-            <div className="readout" role="alert">
-              <p>No se pudieron cargar los datos: {state.message}</p>
-              <button
-                type="button"
-                className="btn"
-                onClick={() => setReloadKey((key) => key + 1)}
+            {state.status === 'success' && state.data.length > 0 && (
+              <div className="rounded-sm border border-[var(--border-subtle)] bg-secondary/35 px-3 py-2 font-mono text-[11px] text-muted-foreground tabular-nums">
+                {t('backtest.candleRange', {
+                  count: state.data.length,
+                  from: formatDateTime(state.data[0].time, locale),
+                  to: formatDateTime(
+                    state.data[state.data.length - 1].time,
+                    locale,
+                  ),
+                })}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>{t('backtest.signal')}</CardTitle>
+            <Badge variant="secondary">
+              {params.average.toUpperCase()} {params.fastPeriod}/{params.slowPeriod}
+            </Badge>
+          </CardHeader>
+
+          <CardContent className="grid grid-cols-1 gap-3.5 sm:grid-cols-3">
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="bt-fast">{t('backtest.fastAverage')}</Label>
+              <Select
+                value={String(params.fastPeriod)}
+                onValueChange={(val) =>
+                  setParams({ ...params, fastPeriod: Number(val) })
+                }
               >
-                Reintentar
-              </button>
-            </div>
-          )}
-
-          {state.status === 'success' && (
-            <p className="field__help">
-              {state.data.length} velas desde{' '}
-              {formatDateTime(state.data[0].time)} hasta{' '}
-              {formatDateTime(state.data[state.data.length - 1].time)} UTC.
-            </p>
-          )}
-        </section>
-
-        <section className="section">
-          <div className="section__header">
-            <h2>Señal</h2>
-          </div>
-
-          <div className="backtest__grid">
-            <div className="field">
-              <label className="field__label" htmlFor="bt-fast">
-                Media rápida
-              </label>
-              <div className="field__control">
-                <select
-                  id="bt-fast"
-                  value={params.fastPeriod}
-                  onChange={(event) =>
-                    setParams({
-                      ...params,
-                      fastPeriod: Number(event.target.value),
-                    })
-                  }
-                >
+                <SelectTrigger id="bt-fast">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
                   {fastOptions.map((option) => (
-                    <option key={option} value={option}>
-                      {option} velas
-                    </option>
+                    <SelectItem key={option} value={String(option)}>
+                      {t('backtest.candleCount', { count: option })}
+                    </SelectItem>
                   ))}
-                </select>
-              </div>
+                </SelectContent>
+              </Select>
             </div>
 
-            <div className="field">
-              <label className="field__label" htmlFor="bt-slow">
-                Media lenta
-              </label>
-              <div className="field__control">
-                <select
-                  id="bt-slow"
-                  value={params.slowPeriod}
-                  onChange={(event) =>
-                    setParams({
-                      ...params,
-                      slowPeriod: Number(event.target.value),
-                    })
-                  }
-                >
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="bt-slow">{t('backtest.slowAverage')}</Label>
+              <Select
+                value={String(params.slowPeriod)}
+                onValueChange={(val) =>
+                  setParams({ ...params, slowPeriod: Number(val) })
+                }
+              >
+                <SelectTrigger id="bt-slow">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
                   {slowOptions.map((option) => (
-                    <option key={option} value={option}>
-                      {option} velas
-                    </option>
+                    <SelectItem key={option} value={String(option)}>
+                      {t('backtest.candleCount', { count: option })}
+                    </SelectItem>
                   ))}
-                </select>
-              </div>
+                </SelectContent>
+              </Select>
             </div>
 
-            <div className="field">
-              <span className="field__label" id="bt-average-label">
-                Tipo de media
+            <div className="flex flex-col gap-1.5">
+              <span
+                className="font-mono text-[10.5px] font-semibold uppercase tracking-[0.07em] text-muted-foreground"
+                id="bt-average-label"
+              >
+                {t('backtest.averageType')}
               </span>
-              <div className="field__control">
-                <div
-                  className="segmented"
-                  role="group"
-                  aria-labelledby="bt-average-label"
-                >
-                  {averageOptions.map((option) => (
-                    <button
-                      key={option.id}
-                      type="button"
-                      className={`segmented__option ${
-                        params.average === option.id
-                          ? 'segmented__option--active'
-                          : ''
-                      }`}
-                      aria-pressed={params.average === option.id}
-                      onClick={() =>
-                        setParams({
-                          ...params,
-                          average: option.id as AverageKind,
-                        })
-                      }
-                    >
-                      {option.label}
-                    </button>
-                  ))}
-                </div>
+              <div
+                className="inline-flex h-8 w-full items-center gap-0.5 rounded-sm border border-border bg-secondary/65 p-0.5"
+                role="group"
+                aria-labelledby="bt-average-label"
+              >
+                {averageOptions.map((option) => (
+                  <button
+                    key={option.id}
+                    type="button"
+                    className={cn(
+                      'inline-flex h-[26px] flex-1 items-center justify-center rounded-[4px] border px-2 font-mono text-xs font-medium transition-all duration-150 cursor-pointer',
+                      params.average === option.id
+                        ? 'border-border bg-card font-semibold text-foreground shadow-[0_1px_2px_rgba(0,0,0,0.18)]'
+                        : 'border-transparent text-muted-foreground hover:text-foreground',
+                    )}
+                    aria-pressed={params.average === option.id}
+                    onClick={() =>
+                      setParams({
+                        ...params,
+                        average: option.id as AverageKind,
+                      })
+                    }
+                  >
+                    {option.label}
+                  </button>
+                ))}
               </div>
             </div>
-          </div>
-        </section>
+          </CardContent>
+        </Card>
 
-        <section className="section">
-          <div className="section__header">
-            <h2>Riesgo y ejecución</h2>
-          </div>
+        <Card>
+          <CardHeader>
+            <CardTitle>{t('backtest.riskAndExecution')}</CardTitle>
+          </CardHeader>
 
-          <div className="backtest__grid">
-            <NumberField
-              name="initialBalance"
-              label="Balance inicial"
-              unit="USD"
-              hint="Capital con el que empieza la simulación."
-              value={values.initialBalance}
-              error={errors.initialBalance}
-              onChange={handleChange}
-            />
+          <CardContent className="flex flex-col gap-4">
+            <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 lg:grid-cols-4">
+              <NumberField
+                name="initialBalance"
+                label={t('backtest.initialBalance')}
+                unit="USD"
+                hint={t('backtest.initialBalanceHint')}
+                value={values.initialBalance}
+                error={errors.initialBalance}
+                onChange={handleChange}
+              />
+              <NumberField
+                name="positionSize"
+                label={t('backtest.positionSize')}
+                unit="%"
+                hint={t('backtest.positionSizeHint')}
+                value={values.positionSize}
+                error={errors.positionSize}
+                onChange={handleChange}
+              />
+              <NumberField
+                name="stopLoss"
+                label={t('backtest.stopLoss')}
+                unit="%"
+                hint={t('backtest.stopLossHint')}
+                value={values.stopLoss}
+                error={errors.stopLoss}
+                onChange={handleChange}
+              />
+              <NumberField
+                name="takeProfit"
+                label={t('backtest.takeProfit')}
+                unit="%"
+                hint={t('backtest.takeProfitHint')}
+                value={values.takeProfit}
+                error={errors.takeProfit}
+                onChange={handleChange}
+              />
+              <NumberField
+                name="maxDailyRisk"
+                label={t('backtest.maxDailyRisk')}
+                unit="%"
+                hint={t('backtest.maxDailyRiskHint')}
+                value={values.maxDailyRisk}
+                error={errors.maxDailyRisk}
+                onChange={handleChange}
+              />
+              <NumberField
+                name="commissionPct"
+                label={t('backtest.commission')}
+                unit="%"
+                hint={t('backtest.commissionHint')}
+                value={values.commissionPct}
+                error={errors.commissionPct}
+                onChange={handleChange}
+              />
+              <NumberField
+                name="slippagePct"
+                label={t('backtest.slippage')}
+                unit="%"
+                hint={t('backtest.slippageHint')}
+                value={values.slippagePct}
+                error={errors.slippagePct}
+                onChange={handleChange}
+              />
+            </div>
 
-            <NumberField
-              name="positionSize"
-              label="Tamaño de posición"
-              unit="%"
-              hint="Porcentaje del balance usado como nocional."
-              value={values.positionSize}
-              error={errors.positionSize}
-              onChange={handleChange}
-            />
+            <div className="flex items-center gap-2.5 pt-1">
+              <Checkbox
+                id="bt-allow-short"
+                checked={allowShort}
+                onCheckedChange={(checked) => setAllowShort(checked === true)}
+              />
+              <label
+                htmlFor="bt-allow-short"
+                className="cursor-pointer text-xs text-muted-foreground select-none"
+              >
+                {t('backtest.allowShorts')}
+              </label>
+            </div>
+          </CardContent>
 
-            <NumberField
-              name="stopLoss"
-              label="Stop loss"
-              unit="%"
-              hint="Distancia desde la entrada hasta el stop."
-              value={values.stopLoss}
-              error={errors.stopLoss}
-              onChange={handleChange}
-            />
+          <CardFooter className="justify-between">
+            <Button
+              type="submit"
+              variant="default"
+              size="sm"
+              disabled={state.status !== 'success'}
+            >
+              <Play className="size-3.5 fill-current" />
+              <span>{t('backtest.run')}</span>
+            </Button>
 
-            <NumberField
-              name="takeProfit"
-              label="Take profit"
-              unit="%"
-              hint="Distancia desde la entrada hasta el objetivo."
-              value={values.takeProfit}
-              error={errors.takeProfit}
-              onChange={handleChange}
-            />
-
-            <NumberField
-              name="maxDailyRisk"
-              label="Riesgo máximo diario"
-              unit="%"
-              hint="Pérdida realizada que bloquea nuevas entradas ese día."
-              value={values.maxDailyRisk}
-              error={errors.maxDailyRisk}
-              onChange={handleChange}
-            />
-
-            <NumberField
-              name="commissionPct"
-              label="Comisión por lado"
-              unit="%"
-              hint="Se cobra al entrar y al salir. 0.1 = 0.1 %."
-              value={values.commissionPct}
-              error={errors.commissionPct}
-              onChange={handleChange}
-            />
-
-            <NumberField
-              name="slippagePct"
-              label="Slippage"
-              unit="%"
-              hint="Deslizamiento adverso en entrada y salida."
-              value={values.slippagePct}
-              error={errors.slippagePct}
-              onChange={handleChange}
-            />
-          </div>
-
-          <label className="backtest__check">
-            <input
-              type="checkbox"
-              checked={allowShort}
-              onChange={(event) => setAllowShort(event.target.checked)}
-            />
-            Permitir cortos: una señal SELL abre una posición short.
-          </label>
-        </section>
-
-        <div className="form__actions">
-          <button
-            type="submit"
-            className="btn btn--primary"
-            disabled={state.status !== 'success' || hasErrors}
-          >
-            Ejecutar backtest
-          </button>
-          <span className="form__status">
-            {runError
-              ? runError
-              : hasErrors
-                ? 'Corrige los campos marcados.'
-                : 'La configuración se aplica al ejecutar.'}
-          </span>
-        </div>
+            <span
+              className={cn(
+                'font-mono text-xs',
+                runError ? 'text-[var(--negative)]' : 'text-muted-foreground',
+              )}
+              role={runError ? 'alert' : undefined}
+            >
+              {runError
+                ? runError
+                : hasErrors
+                  ? t('backtest.fixFields')
+                  : t('backtest.configApplied')}
+            </span>
+          </CardFooter>
+        </Card>
       </form>
 
       {result && metrics && (
-        <>
-          <section className="section">
-            <div className="section__header">
-              <h2>Resultado</h2>
-              <button
+        <div className="flex flex-col gap-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="font-display text-sm font-semibold uppercase tracking-[0.06em] text-foreground">
+              {t('backtest.result')}
+            </h2>
+
+            <div className="flex flex-wrap items-center gap-1.5">
+              <Button
                 type="button"
-                className="btn"
+                variant="outline"
+                size="sm"
+                onClick={() => onNavigate('bot-config')}
+              >
+                {t('backtest.editStrategy')}
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
                 onClick={() => onNavigate('stats')}
               >
-                Ver en Estadísticas
-              </button>
+                <BarChart3 className="size-3.5" />
+                <span>{t('backtest.viewStats')}</span>
+              </Button>
+              <Button
+                type="button"
+                variant="default"
+                size="sm"
+                onClick={() => onNavigate('bot-run')}
+              >
+                <span>{t('backtest.runBot')}</span>
+                <ArrowRight className="size-3.5" />
+              </Button>
             </div>
+          </div>
 
-            <p className="readout">
-              <strong>{result.config.pair}</strong> ·{' '}
-              {result.config.params.average.toUpperCase()}{' '}
-              {result.config.params.fastPeriod}/{result.config.params.slowPeriod} ·{' '}
-              {result.candles.count} velas · comisión{' '}
-              {result.config.settings.commissionPct}% por lado ·{' '}
-              {result.trades.length} operaciones
-              {result.bankrupt ? ' · cuenta agotada' : ''}
-            </p>
+          <Card className="px-3.5 py-2.5 font-mono text-xs text-muted-foreground">
+            {t('backtest.resultReadout', {
+              pair: result.config.pair,
+              average: result.config.params.average.toUpperCase(),
+              fast: result.config.params.fastPeriod,
+              slow: result.config.params.slowPeriod,
+              candles: result.candles.count,
+              commission: result.config.settings.commissionPct,
+              trades: result.trades.length,
+            })}
+            {result.bankrupt ? ` · ${t('backtest.accountDepleted')}` : ''}
+          </Card>
 
-            <div className="stats">
-              <MetricCard
-                label="PnL neto"
-                value={formatSignedMoney(result.netPnl)}
-                hint="Después de comisiones y slippage"
-                tone={toneOf(result.netPnl)}
-              />
-              <MetricCard
-                label="Retorno"
-                value={formatPercent(result.returnPct, 2)}
-                hint="Sobre el balance inicial"
-                tone={toneOf(result.returnPct)}
-              />
-              <MetricCard
-                label="Balance final"
-                value={formatMoney(result.finalBalance)}
-                hint={`Inicial ${formatMoney(result.initialBalance)}`}
-              />
-              <MetricCard
-                label="Operaciones"
-                value={String(metrics.totalTrades)}
-                hint={`${metrics.wins} ganadoras · ${metrics.losses} perdedoras`}
-              />
-              <MetricCard
-                label="Tasa de acierto"
-                value={formatOrDash(metrics.winRate, (value) =>
-                  formatPercent(value, 1),
-                )}
-                hint="Ganadoras sobre el total"
-              />
-              <MetricCard
-                label="Factor de beneficio"
-                value={formatOrDash(metrics.profitFactor, (value) =>
-                  value.toFixed(2),
-                )}
-                hint="Ganancias ÷ pérdidas"
-                tone={toneOf(metrics.profitFactor, 1)}
-              />
-              <MetricCard
-                label="Mayor caída"
-                value={formatMoney(-metrics.maxDrawdown)}
-                hint={`${formatPercent(metrics.maxDrawdownPct, 2)} del máximo`}
-                tone={metrics.maxDrawdown > 0 ? 'negative' : 'neutral'}
-              />
-              <MetricCard
-                label="Comisiones pagadas"
-                value={formatMoney(result.feesPaid)}
-                hint="Entrada + salida"
-                tone={result.feesPaid > 0 ? 'negative' : 'neutral'}
-              />
-            </div>
-          </section>
+          <div className="grid grid-cols-2 gap-2.5 lg:grid-cols-4">
+            <MetricCard
+              label={t('backtest.netPnl')}
+              value={formatSignedMoney(result.netPnl)}
+              hint={t('backtest.netPnlHint')}
+              tone={toneOf(result.netPnl)}
+            />
+            <MetricCard
+              label={t('backtest.return')}
+              value={formatPercent(result.returnPct, 2)}
+              hint={t('backtest.returnHint')}
+              tone={toneOf(result.returnPct)}
+            />
+            <MetricCard
+              label={t('backtest.finalBalance')}
+              value={formatMoney(result.finalBalance)}
+              hint={t('backtest.finalBalanceHint', {
+                amount: formatMoney(result.initialBalance),
+              })}
+            />
+            <MetricCard
+              label={t('backtest.trades')}
+              value={String(metrics.totalTrades)}
+              hint={t('backtest.tradesHint', {
+                wins: metrics.wins,
+                losses: metrics.losses,
+              })}
+            />
+            <MetricCard
+              label={t('backtest.winRate')}
+              value={formatOrDash(metrics.winRate, (value) =>
+                formatPercent(value, 1),
+              )}
+              hint={t('backtest.winRateHint')}
+            />
+            <MetricCard
+              label={t('backtest.profitFactor')}
+              value={formatOrDash(metrics.profitFactor, (value) =>
+                value.toFixed(2),
+              )}
+              hint={t('backtest.profitFactorHint')}
+              tone={toneOf(metrics.profitFactor, 1)}
+            />
+            <MetricCard
+              label={t('backtest.maxDrawdown')}
+              value={formatMoney(-metrics.maxDrawdown)}
+              hint={t('backtest.maxDrawdownHint', {
+                pct: formatPercent(metrics.maxDrawdownPct, 2),
+              })}
+              tone={metrics.maxDrawdown > 0 ? 'negative' : 'neutral'}
+            />
+            <MetricCard
+              label={t('backtest.feesPaid')}
+              value={formatMoney(result.feesPaid)}
+              hint={t('backtest.feesPaidHint')}
+              tone={result.feesPaid > 0 ? 'negative' : 'neutral'}
+            />
+          </div>
 
-          <section className="section">
-            <div className="section__header">
-              <h2>Motivos de salida</h2>
-            </div>
-
-            <div className="backtest__reasons">
+          <Card>
+            <CardHeader>
+              <CardTitle>{t('backtest.exitReasons')}</CardTitle>
+            </CardHeader>
+            <CardContent className="flex flex-wrap gap-2">
               {(Object.keys(exitCounts) as ExitReason[]).map((reason) => (
-                <span key={reason} className="backtest__reason">
-                  {exitReasonLabels[reason]}: {exitCounts[reason]}
-                </span>
+                <Badge key={reason} variant="outline" className="px-2.5 py-1 text-xs">
+                  {t(`exit.${reason}` as TranslationKey)}: {exitCounts[reason]}
+                </Badge>
               ))}
-            </div>
-          </section>
+            </CardContent>
+          </Card>
 
-          <section className="section">
-            <div className="section__header">
-              <h2>Evolución del balance</h2>
-            </div>
+          <section className="flex flex-col gap-2">
+            <h3 className="font-display text-xs font-semibold uppercase tracking-[0.06em] text-foreground">
+              {t('backtest.balanceEvolution')}
+            </h3>
             <EquityChart points={equityPoints} />
           </section>
 
-          <section className="section">
-            <div className="section__header">
-              <h2>Operaciones ({result.trades.length})</h2>
-            </div>
-
+          <section className="flex flex-col gap-2">
+            <h3 className="font-display text-xs font-semibold uppercase tracking-[0.06em] text-foreground">
+              {t('backtest.operations', { count: result.trades.length })}
+            </h3>
             {result.trades.length === 0 ? (
-              <p className="placeholder">
-                Esta configuración no generó operaciones con estas velas.
-                Prueba otro par, temporalidad o períodos de media.
-              </p>
+              <Card className="p-6 text-center text-xs text-muted-foreground">
+                {t('backtest.noTrades')}
+              </Card>
             ) : (
               <TradesTable trades={result.trades} />
             )}
           </section>
-
-          {lastConfig && (
-            <p className="disclaimer">
-              Resultado sobre datos históricos. No incluye liquidez, funding,
-              latencia ni cambios de spread. Un backtest no garantiza
-              resultados futuros. Comisión configurada: por lado.
-            </p>
-          )}
-        </>
+        </div>
       )}
     </div>
   )

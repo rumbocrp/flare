@@ -1,10 +1,13 @@
-import type { ChangeEventHandler } from "react"
+import type { ChangeEventHandler } from 'react'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { cn } from '@/lib/utils'
 
 type NumberFieldProps = {
   name: string
   label: string
   unit: string
-  hint: string
+  hint?: string
   value: string
   error?: string
   onChange: ChangeEventHandler<HTMLInputElement>
@@ -17,35 +20,41 @@ function NumberField({
   hint,
   value,
   error,
-  onChange
+  onChange,
 }: NumberFieldProps) {
-  return (
-    <div className='field'>
-      <label className="field__label" htmlFor={name}>
-        {label}
-      </label>
+  const inputId = `field-${name}`
+  const helpId = `${inputId}-help`
 
-      <div className="field__control">
-        <input
-          id={name}
+  return (
+    <div className="flex flex-col gap-1.5">
+      <Label htmlFor={inputId}>{label}</Label>
+      <div className="flex items-center gap-1.5">
+        <Input
+          id={inputId}
           name={name}
-          type='number'
-          inputMode='decimal'
-          step='any'
+          type="number"
+          step="any"
+          inputMode="decimal"
           value={value}
           onChange={onChange}
-          aria-invalid={error ? true : undefined}
-          aria-describedby={`${name}-help`}
+          aria-invalid={Boolean(error)}
+          aria-describedby={error || hint ? helpId : undefined}
         />
-        <span className='field__unit'>{unit}</span>
+        <span className="inline-flex h-8 min-w-[38px] shrink-0 items-center justify-center rounded-sm border border-border bg-secondary/60 px-1.5 font-mono text-[10.5px] font-medium text-muted-foreground">
+          {unit}
+        </span>
       </div>
-
-      <p
-        id={`${name}-help`}
-        className={`field__help ${error ? 'field__help--error' : ''}`}
-      >
-        {error ?? hint}
-      </p>
+      {(error || hint) && (
+        <span
+          id={helpId}
+          className={cn(
+            'text-[11px] leading-snug',
+            error ? 'text-[var(--negative)]' : 'text-[var(--text-subtle)]',
+          )}
+        >
+          {error ?? hint}
+        </span>
+      )}
     </div>
   )
 }
