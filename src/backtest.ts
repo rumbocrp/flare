@@ -10,11 +10,11 @@ import type {
 
 export type BacktestSettings = {
   initialBalance: number
-  /** Comisión por lado, en porcentaje. 0.1 = 0.1 %. */
+  /** Commission per side, in percentage (e.g. 0.1 = 0.1%). */
   commissionPct: number
-  /** Deslizamiento adverso, en porcentaje. */
+  /** Adverse slippage per fill, in percentage. */
   slippagePct: number
-  /** Si es false, una señal SELL solo cierra largos. */
+  /** When false, SELL signals only close existing long positions. */
   allowShort: boolean
 }
 
@@ -75,8 +75,8 @@ export type BacktestSnapshot = {
   }
 }
 
-/** Datos mínimos para evaluar una salida. Exportado para tests. */
-export type ExitCandidate = {
+/** Minimum fields required to evaluate a simulated position exit. */
+type ExitCandidate = {
   side: TradeSide
   stopPrice: number
   targetPrice: number
@@ -114,9 +114,9 @@ function directionOf(side: TradeSide): number {
 }
 
 /**
- * Aplica slippage adverso:
- * - buy paga más,
- * - sell recibe menos.
+ * Applies adverse slippage:
+ * - buy fills higher,
+ * - sell fills lower.
  */
 function fillPrice(
   price: number,
@@ -127,9 +127,9 @@ function fillPrice(
 }
 
 /**
- * Decide si la vela toca stop o objetivo.
- * Criterio conservador: si ambos se tocan, gana el stop.
- * Si la apertura ya está fuera, se ejecuta a la apertura (hueco).
+ * Checks whether a candle hits stop loss or take profit.
+ * Conservative tie-breaker: if both are reached inside one bar, stop wins.
+ * If the bar opens past either level, it fills at the bar open (gap).
  */
 export function resolveExit(
   position: ExitCandidate,
@@ -168,54 +168,54 @@ export function resolveExit(
 
 function assertPositive(name: string, value: number): void {
   if (!Number.isFinite(value) || value <= 0) {
-    throw new Error(`${name} debe ser un número mayor que 0.`)
+    throw new Error(`${name} must be a number greater than 0.`)
   }
 }
 
 function validateConfig(config: BacktestConfig): void {
   const { params, strategy, settings } = config
 
-  assertPositive('El balance inicial', settings.initialBalance)
-  assertPositive('El tamaño de posición', strategy.positionSize)
-  assertPositive('El stop loss', strategy.stopLoss)
-  assertPositive('El take profit', strategy.takeProfit)
-  assertPositive('El riesgo máximo diario', strategy.maxDailyRisk)
+  assertPositive('Initial balance', settings.initialBalance)
+  assertPositive('Position size', strategy.positionSize)
+  assertPositive('Stop loss', strategy.stopLoss)
+  assertPositive('Take profit', strategy.takeProfit)
+  assertPositive('Max daily risk', strategy.maxDailyRisk)
 
   if (strategy.positionSize > 100) {
-    throw new Error('El tamaño de posición no puede superar 100 %.')
+    throw new Error('Position size cannot exceed 100%.')
   }
   if (!Number.isFinite(settings.commissionPct) || settings.commissionPct < 0) {
-    throw new Error('La comisión no puede ser negativa.')
+    throw new Error('Commission cannot be negative.')
   }
   if (settings.commissionPct >= 100) {
-    throw new Error('La comisión debe ser menor que 100 %.')
+    throw new Error('Commission must be below 100%.')
   }
   if (!Number.isFinite(settings.slippagePct) || settings.slippagePct < 0) {
-    throw new Error('El deslizamiento no puede ser negativo.')
+    throw new Error('Slippage cannot be negative.')
   }
   if (settings.slippagePct >= 100) {
-    throw new Error('El deslizamiento debe ser menor que 100 %.')
+    throw new Error('Slippage must be below 100%.')
   }
   if (!Number.isInteger(params.fastPeriod) || params.fastPeriod < 1) {
-    throw new Error('El período rápido debe ser un entero positivo.')
+    throw new Error('Fast period must be a positive integer.')
   }
   if (!Number.isInteger(params.slowPeriod) || params.slowPeriod < 1) {
-    throw new Error('El período lento debe ser un entero positivo.')
+    throw new Error('Slow period must be a positive integer.')
   }
   if (params.average !== 'sma' && params.average !== 'ema') {
-    throw new Error('El tipo de media debe ser sma o ema.')
+    throw new Error('Moving average type must be sma or ema.')
   }
 }
 
 /**
- * Ejecuta un backtest determinista, vela por vela.
+ * Runs a deterministic candle-by-candle backtest.
  *
- * Reglas:
- * - La señal de la vela i se ejecuta en el open de i + 1.
- * - Una sola posición a la vez.
- * - SL/TP con high/low; stop primero si ambos se tocan.
- * - El balance se actualiza solo al cerrar operaciones (realizado).
- * - La posición abierta al final se cierra al último close.
+ * Rules:
+ * - A signal on candle i executes at candle i + 1 open.
+ * - Single position open at a time.
+ * - SL/TP checked via high/low; stop triggers first if both are hit on the same bar.
+ * - Balance updates only on realized exits.
+ * - Any remaining open position is closed at the final candle close.
  */
 export function runBacktest(
   candles: Candle[],
@@ -245,7 +245,7 @@ export function runBacktest(
       signals: 0,
       skippedSignals: 0,
       bankrupt: false,
-      warnings: ['Se necesitan al menos 2 velas para ejecutar el backtest.'],
+      warnings: ['At least 2 candles are required to run a backtest.'],
     }
   }
 
@@ -293,7 +293,7 @@ export function runBacktest(
     if (balance <= 0) {
       balance = 0
       bankrupt = true
-      warnings.push('El balance llegó a cero. No se abrirán más operaciones.')
+      warnings.push('Account balance reached zero. No new trades will be opened.')
     }
 
     feesPaid = roundMoney(feesPaid + fees)
@@ -363,14 +363,14 @@ export function runBacktest(
     const candle = data[index]
     const day = dayKey(candle.time)
 
-    // Nuevo día UTC: se resetea el límite diario.
+    // New UTC day: reset daily risk counter.
     if (day !== currentDay) {
       currentDay = day
       dayStartBalance = balance
       dayHalted = false
     }
 
-    // 1) Ejecutar la señal confirmada en el cierre anterior.
+    // 1) Execute signal confirmed at the previous candle close.
     if (pending) {
       if (position && pending.closeFirst) {
         closePosition(candle.open, candle.time, 'signal')
@@ -389,7 +389,7 @@ export function runBacktest(
       pending = null
     }
 
-    // 2) Stop loss / take profit dentro de la vela.
+    // 2) Check intra-candle stop loss / take profit.
     if (position) {
       const exit = resolveExit(position, candle)
       if (exit) {
@@ -397,7 +397,7 @@ export function runBacktest(
       }
     }
 
-    // 3) Leer la señal de esta vela para ejecutarla en la apertura siguiente.
+    // 3) Record signal on this candle for execution at the next open.
     const signal = signalByIndex.get(index)
 
     if (signal) {
@@ -417,7 +417,7 @@ export function runBacktest(
     }
   }
 
-  // 4) Cerrar la posición que quede abierta al final.
+  // 4) Close any position still open at the end of the dataset.
   if (position) {
     closePosition(data[lastIndex].close, data[lastIndex].time, 'end')
   }
@@ -445,14 +445,6 @@ export function runBacktest(
     bankrupt,
     warnings,
   }
-}
-
-export const exitReasonLabels: Record<ExitReason, string> = {
-  stop: 'Stop loss',
-  target: 'Take profit',
-  signal: 'Señal contraria',
-  end: 'Fin de datos',
-  bankrupt: 'Balance agotado',
 }
 
 export function createBacktestSnapshot(

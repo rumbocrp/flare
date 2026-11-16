@@ -45,8 +45,8 @@ function delay(ms: number): Promise<void> {
 }
 
 export const syntheticSource: MarketDataSource = {
-  name: 'Datos sintéticos',
-  description: 'Velas generadas por código. No son precios reales.',
+  name: 'Synthetic Data',
+  description: 'Deterministically generated candles. Not real market prices.',
 
   async getCandles({ pair, interval, limit }) {
     await delay(400)

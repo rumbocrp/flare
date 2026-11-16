@@ -3,8 +3,8 @@ import type { AverageKind, Candle, Signal, SignalParams } from './types'
 
 export const RSI_PERIOD = 14
 
-export const fastOptions = [5, 9, 12]
-export const slowOptions = [20, 26, 50]
+export const fastOptions = [5, 9, 12, 21, 50]
+export const slowOptions = [20, 26, 50, 55, 100, 200]
 
 export const averageOptions: { id: AverageKind; label: string }[] = [
   { id: 'sma', label: 'SMA' },

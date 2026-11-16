@@ -3,14 +3,14 @@ import type { Candle, MarketDataSource } from '../types'
 function toNumber(value: unknown): number {
   const number = Number(value)
   if (!Number.isFinite(number)) {
-    throw new Error('La API devolvió un dato inválido')
+    throw new Error('Exchange API returned an invalid numeric value')
   }
   return number
 }
 
 function parseKline(row: unknown): Candle {
   if (!Array.isArray(row) || row.length < 6) {
-    throw new Error('La API devolvió una vela con formato inesperado')
+    throw new Error('Exchange API returned a malformed candle row')
   }
 
   return {
@@ -24,8 +24,8 @@ function parseKline(row: unknown): Candle {
 }
 
 export const binanceSource: MarketDataSource = {
-  name: 'API pública de Binance',
-  description: 'Precios reales de mercado, sin claves.',
+  name: 'Binance Public API',
+  description: 'Live spot market candles without API keys.',
 
   async getCandles({ pair, interval, limit, signal }) {
     const symbol = encodeURIComponent(pair.replace('/', ''))
@@ -33,12 +33,12 @@ export const binanceSource: MarketDataSource = {
 
     const response = await fetch(url, { signal })
     if (!response.ok) {
-      throw new Error(`La API respondió con el código ${response.status}`)
+      throw new Error(`Market API responded with HTTP ${response.status}`)
     }
 
     const rows: unknown = await response.json()
     if (!Array.isArray(rows)) {
-      throw new Error('La API devolvió una respuesta inesperada')
+      throw new Error('Market API returned an unexpected payload')
     }
 
     return rows.map((row) => parseKline(row))

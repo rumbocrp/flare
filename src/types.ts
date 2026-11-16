@@ -1,8 +1,10 @@
 export type PageId =
   | 'dashboard'
+  | 'terminal'
   | 'bot-config'
   | 'bot-run'
   | 'backtest'
+  | 'predictions'
   | 'stats'
   | 'settings'
 
@@ -43,6 +45,7 @@ export type ThemeSetting = 'dark' | 'light' | 'system'
 
 export type AppSettings = {
   theme: ThemeSetting
+  language: Language
 }
 
 export type Candle = {
@@ -56,7 +59,7 @@ export type Candle = {
 
 export type Interval = '5m' | '15m' | '1h' | '4h' | '1d'
 
-export type CandleRequest = {
+type CandleRequest = {
   pair: string
   interval: Interval
   limit: number
@@ -90,7 +93,25 @@ export type Signal = {
   reason: string
 }
 
-export type OverlayKind = 'fast' | 'slow'
+export type CandleStyleMode = 'candles' | 'hollow' | 'heikin-ashi'
+
+export type DrawingToolMode =
+  | 'cursor'
+  | 'measure'
+  | 'trendline'
+  | 'horizontal'
+  | 'fib'
+
+type OverlayKind =
+  | 'fast'
+  | 'slow'
+  | 'trend'
+  | 'ema200'
+  | 'vwap'
+  | 'bb-upper'
+  | 'bb-basis'
+  | 'bb-lower'
+  | 'vol-sma'
 
 export type ChartOverlay = {
   id: string
@@ -99,4 +120,38 @@ export type ChartOverlay = {
   values: (number | null)[]
 }
 
+export type ChartOrderLine = {
+  id: string
+  label: string
+  price: number
+  kind: 'entry' | 'tp' | 'sl' | 'lock'
+  badge: string
+}
+
+export type ChartDrawing =
+  | {
+      id: string
+      type: 'trendline'
+      t1: number
+      p1: number
+      t2: number
+      p2: number
+    }
+  | {
+      id: string
+      type: 'horizontal'
+      price: number
+      label: string
+    }
+  | {
+      id: string
+      type: 'fib'
+      t1: number
+      p1: number
+      t2: number
+      p2: number
+    }
+
 export type ExitReason = 'stop' | 'target' | 'signal' | 'end' | 'bankrupt'
+
+export type Language = 'en' | 'es'

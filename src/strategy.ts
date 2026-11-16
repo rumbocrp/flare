@@ -1,6 +1,6 @@
 import type { Strategy } from './types'
 
-export const availablePairs = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT']
+export const availablePairs = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'DOGE/USDT']
 
 export const defaultStrategy: Strategy = {
   pair: 'BTC/USDT',
@@ -15,7 +15,7 @@ function isFiniteNumber(value: unknown): value is number {
 }
 
 export function isStrategy(value: unknown): value is Strategy {
-  if (typeof value !== 'object' || 'value' === null) return false
+  if (typeof value !== 'object' || value === null) return false
 
   const candidate = value as Record<string, unknown>
 

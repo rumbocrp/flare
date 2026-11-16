@@ -50,9 +50,9 @@ function makeConfig(overrides: {
 }
 
 /**
- * Datos base para una señal BUY en el índice 3.
- * closes: 100, 100, 90, 110, ...
- * La entrada se ejecuta en el open del índice 4.
+ * Base candle fixture producing a BUY signal at index 3.
+ * Closes: 100, 100, 90, 110, ...
+ * Entry fills at the open of index 4.
  */
 function buySignalCandles(): Candle[] {
   return [
@@ -67,7 +67,7 @@ function buySignalCandles(): Candle[] {
 }
 
 describe('resolveExit', () => {
-  it('en un largo, si se tocan stop y objetivo en la misma vela, gana el stop', () => {
+  it('on a long position, stop wins if both stop and target touch in the same bar', () => {
     const exit = resolveExit(
       { side: 'buy', stopPrice: 95, targetPrice: 110 },
       candle(0, 100, 111, 94, 100),
@@ -75,7 +75,7 @@ describe('resolveExit', () => {
     expect(exit).toEqual({ price: 95, reason: 'stop' })
   })
 
-  it('en un largo, un hueco por debajo del stop sale a la apertura', () => {
+  it('on a long position, a gap open below stop fills at open', () => {
     const exit = resolveExit(
       { side: 'buy', stopPrice: 95, targetPrice: 110 },
       candle(0, 90, 91, 89, 90),
@@ -83,7 +83,7 @@ describe('resolveExit', () => {
     expect(exit).toEqual({ price: 90, reason: 'stop' })
   })
 
-  it('en un corto, el objetivo se toca con el mínimo', () => {
+  it('on a short position, target hits on the candle low', () => {
     const exit = resolveExit(
       { side: 'sell', stopPrice: 105, targetPrice: 90 },
       candle(0, 100, 101, 89, 95),
@@ -91,7 +91,7 @@ describe('resolveExit', () => {
     expect(exit).toEqual({ price: 90, reason: 'target' })
   })
 
-  it('sin tocar niveles no hay salida', () => {
+  it('returns null when neither level is reached', () => {
     const exit = resolveExit(
       { side: 'buy', stopPrice: 95, targetPrice: 110 },
       candle(0, 100, 105, 99, 102),
@@ -101,13 +101,13 @@ describe('resolveExit', () => {
 })
 
 describe('runBacktest', () => {
-  it('entra en la apertura de la vela siguiente, no en el cierre de la señal', () => {
+  it('enters at next candle open rather than signal close', () => {
     const candles = [
       candle(0 * HOUR, 100, 101, 99, 100),
       candle(1 * HOUR, 100, 101, 99, 100),
       candle(2 * HOUR, 90, 91, 89, 90),
-      candle(3 * HOUR, 110, 111, 109, 110), // señal BUY al cierre
-      candle(4 * HOUR, 20, 116, 19.5, 115), // apertura con hueco
+      candle(3 * HOUR, 110, 111, 109, 110), // BUY signal at close
+      candle(4 * HOUR, 20, 116, 19.5, 115), // gap open
       candle(5 * HOUR, 115, 116, 114, 120),
       candle(6 * HOUR, 120, 126, 119, 125),
     ]
@@ -119,7 +119,7 @@ describe('runBacktest', () => {
     expect(result.trades[0].entryTime).toBe(4 * HOUR)
   })
 
-  it('toma ganancia en el objetivo y aplica comisiones por lado', () => {
+  it('takes profit at target and charges round-trip commissions', () => {
     const result = runBacktest(
       buySignalCandles(),
       makeConfig({ settings: { commissionPct: 0.1 } }),
@@ -138,7 +138,7 @@ describe('runBacktest', () => {
     expect(result.feesPaid).toBe(2.1)
   })
 
-  it('aplica el stop antes que el objetivo si ambos se tocan', () => {
+  it('prioritizes stop loss over target when both touch on one bar', () => {
     const candles = buySignalCandles()
     candles[5] = candle(5 * HOUR, 105, 111, 94, 100)
 
@@ -153,13 +153,13 @@ describe('runBacktest', () => {
     expect(result.finalBalance).toBe(950)
   })
 
-  it('abre cortos cuando allowShort es true', () => {
+  it('opens short positions when allowShort is true', () => {
     const candles = [
       candle(0 * HOUR, 90, 91, 89, 90),
       candle(1 * HOUR, 100, 101, 99, 100),
       candle(2 * HOUR, 110, 111, 109, 110),
-      candle(3 * HOUR, 90, 91, 89, 90), // señal SELL
-      candle(4 * HOUR, 100, 101, 89, 90), // entrada 100 y objetivo 90
+      candle(3 * HOUR, 90, 91, 89, 90), // SELL signal
+      candle(4 * HOUR, 100, 101, 89, 90), // entry 100, target 90
       candle(5 * HOUR, 90, 91, 89, 90),
       candle(6 * HOUR, 90, 91, 89, 90),
     ]
@@ -176,7 +176,7 @@ describe('runBacktest', () => {
     expect(result.trades[0].pnl).toBe(100)
   })
 
-  it('sin allowShort, una señal SELL estando plano no abre nada', () => {
+  it('ignores SELL signals while flat when allowShort is false', () => {
     const candles = [
       candle(0 * HOUR, 90, 91, 89, 90),
       candle(1 * HOUR, 100, 101, 99, 100),
@@ -190,19 +190,19 @@ describe('runBacktest', () => {
     expect(result.skippedSignals).toBeGreaterThan(0)
   })
 
-  it('el límite de riesgo diario bloquea nuevas entradas el resto del día', () => {
+  it('halts new entries for the rest of the day once maxDailyRisk is breached', () => {
     const candles = [
       candle(0 * HOUR, 100, 101, 99, 100),
       candle(1 * HOUR, 100, 101, 99, 100),
       candle(2 * HOUR, 90, 91, 89, 90),
       candle(3 * HOUR, 110, 111, 109, 110), // BUY
-      candle(4 * HOUR, 100, 101, 99, 110), // entrada 100
+      candle(4 * HOUR, 100, 101, 99, 110), // entry 100
       candle(5 * HOUR, 100, 101, 97, 100), // stop 98
       candle(6 * HOUR, 100, 101, 99, 100),
       candle(7 * HOUR, 100, 101, 99, 100),
-      candle(8 * HOUR, 100, 101, 89, 90), // SELL, se descarta
+      candle(8 * HOUR, 100, 101, 89, 90), // SELL discarded
       candle(9 * HOUR, 90, 111, 89, 110), // BUY
-      candle(10 * HOUR, 110, 111, 109, 110), // ya bloqueado
+      candle(10 * HOUR, 110, 111, 109, 110), // already halted
     ]
 
     const result = runBacktest(
@@ -220,13 +220,13 @@ describe('runBacktest', () => {
     expect(result.skippedSignals).toBeGreaterThan(0)
   })
 
-  it('cierra la posición abierta al final de los datos', () => {
+  it('closes any remaining open position at the final candle close', () => {
     const candles = [
       candle(0 * HOUR, 100, 101, 99, 100),
       candle(1 * HOUR, 100, 101, 99, 100),
       candle(2 * HOUR, 90, 91, 89, 90),
       candle(3 * HOUR, 110, 111, 109, 110), // BUY
-      candle(4 * HOUR, 100, 101, 99, 115), // entrada 100
+      candle(4 * HOUR, 100, 101, 99, 115), // entry 100
       candle(5 * HOUR, 115, 116, 114, 120),
       candle(6 * HOUR, 120, 126, 119, 125),
     ]
@@ -244,7 +244,7 @@ describe('runBacktest', () => {
     expect(result.trades[0].pnl).toBe(250)
   })
 
-  it('el slippage encarece la entrada de un largo', () => {
+  it('applies adverse slippage on long entry fills', () => {
     const candles = [
       candle(0 * HOUR, 100, 101, 99, 100),
       candle(1 * HOUR, 100, 101, 99, 100),
@@ -266,7 +266,7 @@ describe('runBacktest', () => {
     expect(result.trades[0].entryPrice).toBeCloseTo(101, 6)
   })
 
-  it('no muta las velas de entrada', () => {
+  it('does not mutate input candles', () => {
     const candles = buySignalCandles()
     const before = JSON.stringify(candles)
 
@@ -275,7 +275,7 @@ describe('runBacktest', () => {
     expect(JSON.stringify(candles)).toBe(before)
   })
 
-  it('devuelve un resultado vacío con warning si hay menos de 2 velas', () => {
+  it('returns an empty result with warning when fewer than 2 candles exist', () => {
     const result = runBacktest(
       [candle(0, 100, 101, 99, 100)],
       makeConfig(),
@@ -286,7 +286,7 @@ describe('runBacktest', () => {
     expect(result.warnings.length).toBeGreaterThan(0)
   })
 
-  it('las métricas usan el balance inicial del backtest', () => {
+  it('computes metrics from the configured initial balance', () => {
     const candles = buySignalCandles()
     const result = runBacktest(candles, makeConfig())
 

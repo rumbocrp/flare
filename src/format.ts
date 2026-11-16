@@ -28,7 +28,6 @@ export function formatOrDash(
   return value === null ? '—' : format(value)
 }
 
-
 export function formatMoneyWhole(value: number): string {
   return value.toLocaleString('en-US', {
     style: 'currency',
@@ -37,8 +36,8 @@ export function formatMoneyWhole(value: number): string {
   })
 }
 
-export function formatDateTime(timestamp: number): string {
-  return new Date(timestamp).toLocaleString('en-US', {
+export function formatDateTime(timestamp: number, locale = 'en-US'): string {
+  return new Date(timestamp).toLocaleString(locale, {
     month: 'short',
     day: 'numeric',
     hour: '2-digit',
