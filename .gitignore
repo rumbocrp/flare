@@ -25,3 +25,8 @@ dist-ssr
 
 # Local app backups (personal data)
 Backup/
+
+# Agent local tooling & server runtime state
+.agent/
+src/server/bot-state.json
+src/server/bot-state.json.*
