@@ -156,40 +156,51 @@ function CandleChart({
   const svgRef = useRef<SVGSVGElement | null>(null)
   const wheelAccumRef = useRef<number>(0)
   const candleCountRef = useRef<number>(candles.length)
-  candleCountRef.current = candles.length
+
+  useEffect(() => {
+    candleCountRef.current = candles.length
+  }, [candles.length])
 
   const [internalIndex, setInternalIndex] = useState<number | null>(null)
   const [hoverPrice, setHoverPrice] = useState<number | null>(null)
-  const [wheelZoomLocked, setWheelZoomLocked] = useState<boolean>(
-    defaultWheelZoomLocked,
-  )
-  const [draftAnchor, setDraftAnchor] = useState<{
+  const [wheelZoomOverride, setWheelZoomOverride] = useState<{
+    defaultLocked: boolean
+    locked: boolean
+  } | null>(null)
+  const wheelZoomLocked =
+    wheelZoomOverride && wheelZoomOverride.defaultLocked === defaultWheelZoomLocked
+      ? wheelZoomOverride.locked
+      : defaultWheelZoomLocked
+  const setWheelZoomLocked = (
+    updater: boolean | ((prev: boolean) => boolean),
+  ) => {
+    setWheelZoomOverride((prev) => {
+      const current =
+        prev && prev.defaultLocked === defaultWheelZoomLocked
+          ? prev.locked
+          : defaultWheelZoomLocked
+      const next = typeof updater === 'function' ? updater(current) : updater
+      return { defaultLocked: defaultWheelZoomLocked, locked: next }
+    })
+  }
+  const [rawDraftAnchor, setDraftAnchor] = useState<{
     time: number
     price: number
   } | null>(null)
-  const [measureRange, setMeasureRange] = useState<{
+  const [rawMeasureRange, setMeasureRange] = useState<{
     start: MeasureAnchor
     end: MeasureAnchor | null
     locked: boolean
   } | null>(null)
 
+  const draftAnchor =
+    drawingMode === 'trendline' || drawingMode === 'fib' ? rawDraftAnchor : null
+  const measureRange = drawingMode === 'measure' ? rawMeasureRange : null
+
   const displayCandles = useMemo(
     () => (candleStyle === 'heikin-ashi' ? toHeikinAshi(candles) : candles),
     [candleStyle, candles],
   )
-
-  useEffect(() => {
-    setWheelZoomLocked(defaultWheelZoomLocked)
-  }, [defaultWheelZoomLocked])
-
-  useEffect(() => {
-    if (drawingMode !== 'trendline' && drawingMode !== 'fib') {
-      setDraftAnchor(null)
-    }
-    if (drawingMode !== 'measure') {
-      setMeasureRange(null)
-    }
-  }, [drawingMode])
 
   useEffect(() => {
     if (!draftAnchor && !measureRange) return
@@ -264,22 +275,16 @@ function CandleChart({
     }
   }, [containerRef, onZoomDelta, plotWidth, wheelZoomLocked])
 
-  if (displayCandles.length === 0) {
-    return (
-      <div className="chart" ref={containerRef}>
-        <p className="chart__empty">{t('chart.noCandles')}</p>
-      </div>
-    )
-  }
-
   const count = displayCandles.length
-  const lastIndex = count - 1
+  const lastIndex = Math.max(0, count - 1)
+  const firstTime = count > 0 ? displayCandles[0].time : 0
+  const lastTime = count > 0 ? displayCandles[lastIndex].time : 0
 
   let candleLowMin = Infinity
   let candleHighMax = -Infinity
   let minIdx = 0
   let maxIdx = 0
-  let maxVolume = 1
+  let peakVolume = 1
 
   for (let i = 0; i < count; i++) {
     const c = displayCandles[i]
@@ -291,10 +296,11 @@ function CandleChart({
       candleHighMax = c.high
       maxIdx = i
     }
-    if (c.volume > maxVolume) {
-      maxVolume = c.volume
+    if (c.volume > peakVolume) {
+      peakVolume = c.volume
     }
   }
+  const maxVolume = peakVolume
 
   const overlayExtremes: number[] = []
   for (const ov of overlays) {
@@ -308,8 +314,10 @@ function CandleChart({
   }
 
   const orderPrices = orderLines.map((o) => o.price).filter((p) => p > 0)
-  const allMinCandidates = [candleLowMin, ...orderPrices, ...overlayExtremes]
-  const allMaxCandidates = [candleHighMax, ...orderPrices, ...overlayExtremes]
+  const allMinCandidates =
+    count > 0 ? [candleLowMin, ...orderPrices, ...overlayExtremes] : [0]
+  const allMaxCandidates =
+    count > 0 ? [candleHighMax, ...orderPrices, ...overlayExtremes] : [1]
   const rawMin = Math.min(...allMinCandidates)
   const rawMax = Math.max(...allMaxCandidates)
 
@@ -320,44 +328,8 @@ function CandleChart({
 
   const plotHeight = Math.max(80, height - MARGIN.top - MARGIN.bottom)
   const yBottom = MARGIN.top + plotHeight
-  const slot = plotWidth / count
+  const slot = count > 0 ? plotWidth / count : 0
   const bodyWidth = Math.max(1.5, Math.min(18, slot * 0.72))
-
-  function xOf(index: number): number {
-    return MARGIN.left + (index + 0.5) * slot
-  }
-
-  function xOfTime(timestamp: number): number | null {
-    if (displayCandles.length === 0) return null
-    const firstT = displayCandles[0].time
-    const lastT = displayCandles[lastIndex].time
-    if (lastT === firstT) return xOf(0)
-    const exactIdx = ((timestamp - firstT) / (lastT - firstT)) * lastIndex
-    return MARGIN.left + (exactIdx + 0.5) * slot
-  }
-
-  function yOf(value: number): number {
-    return MARGIN.top + (1 - (value - yMin) / ySpan) * plotHeight
-  }
-
-  function priceOfY(yPx: number): number {
-    const clampedY = Math.max(MARGIN.top, Math.min(yBottom, yPx))
-    const ratio = 1 - (clampedY - MARGIN.top) / plotHeight
-    return yMin + ratio * ySpan
-  }
-
-  const shownIndex = Math.min(activeIndex ?? lastIndex, lastIndex)
-  const shown = displayCandles[shownIndex] ?? displayCandles[lastIndex]
-  const rawShown = candles[shownIndex] ?? candles[lastIndex]
-  const change =
-    rawShown.open !== 0
-      ? ((rawShown.close - rawShown.open) / rawShown.open) * 100
-      : 0
-  const lastCandle = displayCandles[lastIndex]
-
-  const fromText = formatDateTime(displayCandles[0].time, locale)
-  const toText = formatDateTime(displayCandles[lastIndex].time, locale)
-  const spanMs = displayCandles[lastIndex].time - displayCandles[0].time
 
   const timeTicks = useMemo(() => {
     if (count < 4 || plotWidth < 200) return []
@@ -373,6 +345,7 @@ function CandleChart({
   }, [count, lastIndex, plotWidth])
 
   const bbPolygonPoints = useMemo(() => {
+    if (count === 0) return null
     const upper = overlays.find((o) => o.kind === 'bb-upper')
     const lower = overlays.find((o) => o.kind === 'bb-lower')
     if (!upper || !lower) return null
@@ -408,6 +381,115 @@ function CandleChart({
       null
     )
   }, [activeIndex, signals])
+
+  const volSmaPoints = useMemo(() => {
+    if (count === 0 || !volSmaValues || volSmaValues.length !== count) return ''
+    return volSmaValues
+      .map((val, idx) => {
+        if (val === null || val === undefined || !Number.isFinite(val)) {
+          return null
+        }
+        const volRatio = Math.min(1, val / maxVolume)
+        const volH = Math.max(1, volRatio * (plotHeight * 0.16))
+        const x = MARGIN.left + (idx + 0.5) * slot
+        return `${x},${yBottom - volH}`
+      })
+      .filter((p): p is string => p !== null)
+      .join(' ')
+  }, [count, maxVolume, plotHeight, slot, volSmaValues, yBottom])
+
+  const activeMeasureEnd = measureRange?.end
+  const measureData = useMemo(() => {
+    if (count === 0 || !measureRange || !activeMeasureEnd) return null
+    const mapTimeX = (ts: number): number => {
+      if (lastTime === firstTime) return MARGIN.left + 0.5 * slot
+      const exactIdx = ((ts - firstTime) / (lastTime - firstTime)) * lastIndex
+      return MARGIN.left + (exactIdx + 0.5) * slot
+    }
+    const mapPriceY = (val: number): number =>
+      MARGIN.top + (1 - (val - yMin) / ySpan) * plotHeight
+    const x1 = mapTimeX(measureRange.start.time)
+    const x2 = mapTimeX(activeMeasureEnd.time)
+    const y1 = mapPriceY(measureRange.start.price)
+    const y2 = mapPriceY(activeMeasureEnd.price)
+    const diffUsd = activeMeasureEnd.price - measureRange.start.price
+    const diffPct =
+      measureRange.start.price > 0
+        ? (diffUsd / measureRange.start.price) * 100
+        : 0
+    const barsDelta = Math.abs(activeMeasureEnd.index - measureRange.start.index) + 1
+    const durationText = formatDurationMs(
+      activeMeasureEnd.time - measureRange.start.time,
+    )
+    const isUp = diffUsd >= 0
+    const leftX = Math.min(x1, x2)
+    const topY = Math.min(y1, y2)
+    const rectW = Math.max(2, Math.abs(x2 - x1))
+    const rectH = Math.max(2, Math.abs(y2 - y1))
+    return {
+      leftX,
+      topY,
+      rectW,
+      rectH,
+      x2,
+      y2,
+      isUp,
+      label: `${diffUsd >= 0 ? '+' : ''}${formatPrice(diffUsd)} (${diffPct >= 0 ? '+' : ''}${diffPct.toFixed(2)}%) · ${barsDelta}b · ${durationText}`,
+    }
+  }, [
+    activeMeasureEnd,
+    count,
+    firstTime,
+    lastIndex,
+    lastTime,
+    measureRange,
+    plotHeight,
+    slot,
+    yMin,
+    ySpan,
+  ])
+
+  if (count === 0) {
+    return (
+      <div className="chart" ref={containerRef}>
+        <p className="chart__empty">{t('chart.noCandles')}</p>
+      </div>
+    )
+  }
+
+  function xOf(index: number): number {
+    return MARGIN.left + (index + 0.5) * slot
+  }
+
+  function xOfTime(timestamp: number): number | null {
+    if (displayCandles.length === 0) return null
+    if (lastTime === firstTime) return xOf(0)
+    const exactIdx = ((timestamp - firstTime) / (lastTime - firstTime)) * lastIndex
+    return MARGIN.left + (exactIdx + 0.5) * slot
+  }
+
+  function yOf(value: number): number {
+    return MARGIN.top + (1 - (value - yMin) / ySpan) * plotHeight
+  }
+
+  function priceOfY(yPx: number): number {
+    const clampedY = Math.max(MARGIN.top, Math.min(yBottom, yPx))
+    const ratio = 1 - (clampedY - MARGIN.top) / plotHeight
+    return yMin + ratio * ySpan
+  }
+
+  const shownIndex = Math.min(activeIndex ?? lastIndex, lastIndex)
+  const shown = displayCandles[shownIndex] ?? displayCandles[lastIndex]
+  const rawShown = candles[shownIndex] ?? candles[lastIndex]
+  const change =
+    rawShown.open !== 0
+      ? ((rawShown.close - rawShown.open) / rawShown.open) * 100
+      : 0
+  const lastCandle = displayCandles[lastIndex]
+
+  const fromText = formatDateTime(displayCandles[0].time, locale)
+  const toText = formatDateTime(displayCandles[lastIndex].time, locale)
+  const spanMs = displayCandles[lastIndex].time - displayCandles[0].time
 
   const description =
     signals.length > 0
@@ -591,54 +673,6 @@ function CandleChart({
       hoverPrice !== null &&
       Math.abs(yOf(hoverPrice) - yOf(lastCandle.close)) < 18,
   )
-
-  const volSmaPoints = useMemo(() => {
-    if (!volSmaValues || volSmaValues.length !== count) return ''
-    return volSmaValues
-      .map((val, idx) => {
-        if (val === null || val === undefined || !Number.isFinite(val)) {
-          return null
-        }
-        const volRatio = Math.min(1, val / maxVolume)
-        const volH = Math.max(1, volRatio * (plotHeight * 0.16))
-        return `${xOf(idx)},${yBottom - volH}`
-      })
-      .filter((p): p is string => p !== null)
-      .join(' ')
-  }, [count, maxVolume, plotHeight, volSmaValues, yBottom])
-
-  const activeMeasureEnd = measureRange?.end
-  const measureData = useMemo(() => {
-    if (!measureRange || !activeMeasureEnd) return null
-    const x1 = xOfTime(measureRange.start.time) ?? MARGIN.left
-    const x2 = xOfTime(activeMeasureEnd.time) ?? xOf(activeMeasureEnd.index)
-    const y1 = yOf(measureRange.start.price)
-    const y2 = yOf(activeMeasureEnd.price)
-    const diffUsd = activeMeasureEnd.price - measureRange.start.price
-    const diffPct =
-      measureRange.start.price > 0
-        ? (diffUsd / measureRange.start.price) * 100
-        : 0
-    const barsDelta = Math.abs(activeMeasureEnd.index - measureRange.start.index) + 1
-    const durationText = formatDurationMs(
-      activeMeasureEnd.time - measureRange.start.time,
-    )
-    const isUp = diffUsd >= 0
-    const leftX = Math.min(x1, x2)
-    const topY = Math.min(y1, y2)
-    const rectW = Math.max(2, Math.abs(x2 - x1))
-    const rectH = Math.max(2, Math.abs(y2 - y1))
-    return {
-      leftX,
-      topY,
-      rectW,
-      rectH,
-      x2,
-      y2,
-      isUp,
-      label: `${diffUsd >= 0 ? '+' : ''}${formatPrice(diffUsd)} (${diffPct >= 0 ? '+' : ''}${diffPct.toFixed(2)}%) · ${barsDelta}b · ${durationText}`,
-    }
-  }, [activeMeasureEnd, measureRange])
 
   return (
     <div

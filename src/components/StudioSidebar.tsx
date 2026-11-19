@@ -103,31 +103,53 @@ function StudioSidebar({
   const { t, locale, language } = useI18n()
   const [activeTab, setActiveTab] = useState<'strategies' | 'indicators' | 'trade'>('strategies')
   const [presetFilter, setPresetFilter] = useState<'all' | 'crypto-spot' | 'prediction-market'>('all')
-  const [presetReports, setPresetReports] = useState<Record<string, PresetReport>>({})
-  const [evaluatingCount, setEvaluatingCount] = useState<number | null>(null)
+  const feedSignature = `${pair}|${timeframe}|${candles.length}|${candles[candles.length - 1]?.time ?? 0}`
+  const [reportBatch, setReportBatch] = useState<{
+    signature: string
+    reports: Record<string, PresetReport>
+    evaluatingCount: number | null
+  }>({
+    signature: '',
+    reports: {},
+    evaluatingCount: null,
+  })
+  const presetReports =
+    reportBatch.signature === feedSignature ? reportBatch.reports : {}
+  const evaluatingCount =
+    reportBatch.signature === feedSignature ? reportBatch.evaluatingCount : null
   const [evalNonce, setEvalNonce] = useState(0)
 
   // Local editable risk fields when Trade tab strategy calibration is open
-  const [slInput, setSlInput] = useState(() => String(strategy?.stopLoss ?? 2))
-  const [tpInput, setTpInput] = useState(() => String(strategy?.takeProfit ?? 4))
-  const [posInput, setPosInput] = useState(() => String(strategy?.positionSize ?? 15))
-  const [dailyInput, setDailyInput] = useState(() => String(strategy?.maxDailyRisk ?? 3))
+  const strategyKey = strategy
+    ? `${strategy.stopLoss}|${strategy.takeProfit}|${strategy.positionSize}|${strategy.maxDailyRisk}`
+    : 'default'
+  const [riskEdits, setRiskEdits] = useState<{
+    key: string
+    sl: string
+    tp: string
+    pos: string
+    daily: string
+  } | null>(null)
+  const activeRisk =
+    riskEdits && riskEdits.key === strategyKey
+      ? riskEdits
+      : {
+          key: strategyKey,
+          sl: String(strategy?.stopLoss ?? 2),
+          tp: String(strategy?.takeProfit ?? 4),
+          pos: String(strategy?.positionSize ?? 15),
+          daily: String(strategy?.maxDailyRisk ?? 3),
+        }
+  const slInput = activeRisk.sl
+  const tpInput = activeRisk.tp
+  const posInput = activeRisk.pos
+  const dailyInput = activeRisk.daily
+  const setSlInput = (val: string) => setRiskEdits({ ...activeRisk, sl: val })
+  const setTpInput = (val: string) => setRiskEdits({ ...activeRisk, tp: val })
+  const setPosInput = (val: string) => setRiskEdits({ ...activeRisk, pos: val })
+  const setDailyInput = (val: string) =>
+    setRiskEdits({ ...activeRisk, daily: val })
   const [riskSavedMsg, setRiskSavedMsg] = useState<string | null>(null)
-
-  useEffect(() => {
-    if (!strategy) return
-    setSlInput(String(strategy.stopLoss))
-    setTpInput(String(strategy.takeProfit))
-    setPosInput(String(strategy.positionSize))
-    setDailyInput(String(strategy.maxDailyRisk))
-  }, [strategy?.stopLoss, strategy?.takeProfit, strategy?.positionSize, strategy?.maxDailyRisk])
-
-  // Clear cached feed reports whenever the market feed changes
-  const feedSignature = `${pair}|${timeframe}|${candles.length}|${candles[candles.length - 1]?.time ?? 0}`
-  useEffect(() => {
-    setPresetReports({})
-    setEvaluatingCount(null)
-  }, [pair, timeframe, candles.length])
 
   // Progressive non-blocking preset simulation when triggered
   useEffect(() => {
@@ -138,14 +160,20 @@ function StudioSidebar({
     const runStep = (idx: number) => {
       if (cancelled) return
       if (idx >= STRATEGY_PRESETS.length) {
-        setPresetReports({ ...nextReports })
-        setEvaluatingCount(null)
+        setReportBatch({
+          signature: feedSignature,
+          reports: { ...nextReports },
+          evaluatingCount: null,
+        })
         return
       }
-      setEvaluatingCount(idx + 1)
       const preset = STRATEGY_PRESETS[idx]
       nextReports[preset.id] = evaluateBotPresetAccuracy(candles, preset)
-      setPresetReports({ ...nextReports })
+      setReportBatch({
+        signature: feedSignature,
+        reports: { ...nextReports },
+        evaluatingCount: idx + 1,
+      })
       window.setTimeout(() => runStep(idx + 1), 12)
     }
 

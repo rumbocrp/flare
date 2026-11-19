@@ -240,11 +240,12 @@ function Dashboard({
       0,
     )
 
+    const cumulativeWinRates: number[] = []
     let runningWins = 0
-    const cumulativeWinRates = executedHistory.map((op, index) => {
-      if (op.won) runningWins += 1
-      return (runningWins / (index + 1)) * 100
-    })
+    for (let index = 0; index < executedHistory.length; index++) {
+      if (executedHistory[index].won) runningWins += 1
+      cumulativeWinRates.push((runningWins / (index + 1)) * 100)
+    }
 
     return {
       total,

@@ -153,11 +153,13 @@ export default function Predictions({ onNavigate }: PredictionsProps) {
   // Polymarket (live market)
   const [polyTf, setPolyTf] = useState<PolymarketTimeframe>('15m')
   const [polyLimit, setPolyLimit] = useState<24 | 48>(24)
-  const [polyState, setPolyState] = useState<
-    | { status: 'idle' | 'loading' }
-    | { status: 'success'; data: PolymarketSnapshot }
-    | { status: 'error'; message: string }
-  >({ status: 'idle' })
+  const [polyReloadNonce, setPolyReloadNonce] = useState(0)
+  const [polyStored, setPolyStored] = useState<{
+    key: string
+    state:
+      | { status: 'success'; data: PolymarketSnapshot }
+      | { status: 'error'; message: string }
+  } | null>(null)
 
   const activeTimeframe: Interval =
     tab === 'polymarket'
@@ -176,27 +178,45 @@ export default function Predictions({ onNavigate }: PredictionsProps) {
     reloadKey,
   )
 
-  const loadPolymarket = useCallback(
-    async (tf: PolymarketTimeframe, limit: number) => {
-      setPolyState({ status: 'loading' })
-      try {
-        const data = await fetchPolymarketSnapshot(tf, limit)
-        setPolyState({ status: 'success', data })
-      } catch (err) {
-        setPolyState({
-          status: 'error',
-          message: err instanceof Error ? err.message : String(err),
-        })
-      }
-    },
-    [],
-  )
+  const polyKey = `${polyTf}|${polyLimit}|${polyReloadNonce}`
+
+  const loadPolymarket = useCallback(() => {
+    setPolyReloadNonce((n) => n + 1)
+  }, [])
 
   useEffect(() => {
-    if (tab === 'polymarket') {
-      void loadPolymarket(polyTf, polyLimit)
+    if (tab !== 'polymarket') return
+    let cancelled = false
+    fetchPolymarketSnapshot(polyTf, polyLimit)
+      .then((data) => {
+        if (!cancelled) {
+          setPolyStored({ key: polyKey, state: { status: 'success', data } })
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setPolyStored({
+            key: polyKey,
+            state: {
+              status: 'error',
+              message: err instanceof Error ? err.message : String(err),
+            },
+          })
+        }
+      })
+    return () => {
+      cancelled = true
     }
-  }, [tab, polyTf, polyLimit, loadPolymarket])
+  }, [tab, polyTf, polyLimit, polyKey])
+
+  const polyState:
+    | { status: 'idle' | 'loading' }
+    | { status: 'success'; data: PolymarketSnapshot }
+    | { status: 'error'; message: string } = useMemo(() => {
+    if (tab !== 'polymarket') return { status: 'idle' }
+    if (polyStored && polyStored.key === polyKey) return polyStored.state
+    return { status: 'loading' }
+  }, [tab, polyStored, polyKey])
 
   const costs: MarketCostModel = useMemo(
     () => ({
@@ -1303,7 +1323,7 @@ export default function Predictions({ onNavigate }: PredictionsProps) {
                 <Button
                   size="sm"
                   variant="outline"
-                  onClick={() => void loadPolymarket(polyTf, polyLimit)}
+                  onClick={loadPolymarket}
                   disabled={polyState.status === 'loading'}
                 >
                   <RefreshCw
@@ -1341,7 +1361,7 @@ export default function Predictions({ onNavigate }: PredictionsProps) {
                 <Button
                   size="sm"
                   variant="outline"
-                  onClick={() => void loadPolymarket(polyTf, polyLimit)}
+                  onClick={loadPolymarket}
                 >
                   <RefreshCw className="size-3.5" />
                   <span>{isEs ? 'Reintentar' : 'Retry'}</span>

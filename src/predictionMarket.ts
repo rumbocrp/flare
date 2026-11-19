@@ -473,7 +473,7 @@ type SimulationMetrics = {
 type MarketQuote = { mid: number; resolvedYes: boolean | null }
 export type QuoteProvider = (rule: PredictionRule, entryIndex: number) => MarketQuote | null
 
-type SimulationResult = {
+export type SimulationResult = {
   insufficientData: boolean
   priceSource: 'modeled' | 'real'
   trainFromTime: number | null
