@@ -11,9 +11,8 @@ import {
   type StrategyPreset,
 } from '../botEngine'
 import { binanceSource } from '../market/binance'
-import { syntheticSource } from '../market/synthetic'
 import { availablePairs } from '../strategy'
-import type { Interval, Strategy } from '../types'
+import type { Candle, Interval, Strategy } from '../types'
 import type {
   PolymarketSnapshot,
   PolymarketTimeframe,
@@ -28,7 +27,7 @@ type ServerCacheTelemetry = {
   binanceErrors: number
   hitRatePct: number
   avgLatencyMs: number
-  lastSource: 'binance' | 'binance-cache' | 'synthetic-fallback'
+  lastSource: 'binance' | 'binance-cache'
   activeCacheEntries: number
 }
 
@@ -39,7 +38,7 @@ type ServerTelemetrySnapshot = {
   tickCount: number
   connectedStreamClients: number
   sseSeq?: number
-  lastDataSource?: 'binance' | 'binance-cache' | 'synthetic-fallback'
+  lastDataSource?: 'binance' | 'binance-cache' | 'unavailable'
   lastQuoteError?: string | null
   cache: ServerCacheTelemetry
 }
@@ -314,6 +313,47 @@ function buildFallbackMt5Snapshot(): Mt5BridgeSnapshot {
   }
 }
 
+const API_TOKEN_STORAGE_KEY = 'flare:api-token'
+
+export function getApiAuthToken(): string | null {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      const stored = window.localStorage.getItem(API_TOKEN_STORAGE_KEY)?.trim()
+      if (stored) return stored
+    }
+  } catch {
+    // Ignore storage access errors
+  }
+  return null
+}
+
+export function setApiAuthToken(token: string | null): void {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      const cleaned = token?.trim() ?? ''
+      if (cleaned) {
+        window.localStorage.setItem(API_TOKEN_STORAGE_KEY, cleaned)
+      } else {
+        window.localStorage.removeItem(API_TOKEN_STORAGE_KEY)
+      }
+    }
+  } catch {
+    // Ignore storage access errors
+  }
+}
+
+function buildAuthHeaders(): Record<string, string> {
+  const token = getApiAuthToken()
+  return token ? { Authorization: `Bearer ${token}` } : {}
+}
+
+function appendStreamAuthToken(url: string): string {
+  const token = getApiAuthToken()
+  if (!token) return url
+  const sep = url.includes('?') ? '&' : '?'
+  return `${url}${sep}token=${encodeURIComponent(token)}`
+}
+
 async function fetchFromBackend<T>(
   path: string,
   init?: RequestInit,
@@ -325,16 +365,20 @@ async function fetchFromBackend<T>(
   for (const base of candidates) {
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), 3_500)
+    const onExternalAbort = () => controller.abort()
+    init?.signal?.addEventListener('abort', onExternalAbort, { once: true })
     try {
       const response = await fetch(`${base}${path}`, {
         ...init,
         headers: {
           'Content-Type': 'application/json',
+          ...buildAuthHeaders(),
           ...(init?.headers ?? {}),
         },
         signal: controller.signal,
       })
       clearTimeout(timeout)
+      init?.signal?.removeEventListener('abort', onExternalAbort)
       if (response.ok) {
         const contentType = response.headers.get('content-type') ?? ''
         if (contentType.includes('application/json')) {
@@ -345,11 +389,14 @@ async function fetchFromBackend<T>(
       }
     } catch {
       clearTimeout(timeout)
+      init?.signal?.removeEventListener('abort', onExternalAbort)
     }
   }
 
   return null
 }
+
+const clientStartedAtMs = Date.now()
 
 async function runFallbackTick(): Promise<void> {
   if (fallbackExchange.killSwitchActive) {
@@ -367,16 +414,22 @@ async function runFallbackTick(): Promise<void> {
       nowMs: Date.now(),
       requireExecutableQuote: true,
     })
-  } catch {
-    const candles = await syntheticSource.getCandles({
-      pair: fallbackPreset.strategy.pair,
-      interval: fallbackPreset.timeframe,
-      limit: 300,
-    })
-    fallbackState = stepBotEngine(fallbackState, candles, fallbackPreset, {
-      nowMs: Date.now(),
-      requireExecutableQuote: true,
-    })
+  } catch (error) {
+    const detail =
+      error instanceof Error ? error.message : 'Live Binance feed unavailable'
+    const now = Date.now()
+    fallbackState = {
+      ...fallbackState,
+      logs: [
+        {
+          id: now,
+          timestamp: new Date(now).toISOString(),
+          level: 'risk' as const,
+          message: `[DATA GUARD] ${detail} — refusing synthetic fallback candles.`,
+        },
+        ...fallbackState.logs,
+      ].slice(0, 80),
+    }
   }
   fallbackTicks += 1
   fallbackLastLatencyMs = Math.max(1, Date.now() - start)
@@ -393,20 +446,20 @@ function buildFallbackSnapshot(): BotServerSnapshot {
     mt5: buildFallbackMt5Snapshot(),
     connectionMode: 'local-fallback',
     telemetry: {
-      uptimeSec: fallbackTicks * 15,
-      lastTickAt: new Date().toISOString(),
+      uptimeSec: Math.max(0, Math.floor((Date.now() - clientStartedAtMs) / 1000)),
+      lastTickAt: fallbackTicks > 0 ? new Date().toISOString() : null,
       lastTickLatencyMs: fallbackLastLatencyMs,
       tickCount: fallbackTicks,
-      connectedStreamClients: 1,
+      connectedStreamClients: 0,
       cache: {
-        hits: fallbackTicks,
-        misses: 1,
+        hits: 0,
+        misses: fallbackTicks,
         coalescedRequests: 0,
         binanceErrors: 0,
-        hitRatePct: fallbackTicks > 0 ? 85 : 0,
+        hitRatePct: 0,
         avgLatencyMs: fallbackLastLatencyMs,
         lastSource: 'binance',
-        activeCacheEntries: 1,
+        activeCacheEntries: 0,
       },
     },
   }
@@ -558,52 +611,31 @@ export async function submitDemoOrderOnServer(params: {
     }
   }
 
-  const maxNotional = fallbackExchange.hardLimits.maxOrderNotionalUsd
-  const rejectedReason = fallbackExchange.killSwitchActive
-    ? 'Emergency Kill-Switch ACTIVE.'
-    : params.notionalUsd > maxNotional
-      ? `Order rejected by hard risk limit: $${params.notionalUsd.toFixed(2)} USD exceeds the max allowed per order ($${maxNotional.toFixed(2)} USD).`
-      : fallbackExchange.dailyOrderCount >=
-          fallbackExchange.hardLimits.maxDailyOrders
-        ? 'Daily hard order-frequency limit reached.'
-        : null
-
-  const price = params.pair.startsWith('BTC')
-    ? 85000
-    : params.pair.startsWith('ETH')
-      ? 2800
-      : 175
-  const quantity = Number((params.notionalUsd / price).toFixed(6))
+  const offlineReason =
+    'Backend server offline — refusing order execution without live exchange price feed.'
   const order: ExchangeOrderRecord = {
-    id: `ORD-${Date.now().toString().slice(-4)}`,
+    id: `ORD-OFFLINE-${Date.now().toString().slice(-4)}`,
+    clientOrderId,
     timestamp: new Date().toISOString(),
     pair: params.pair,
     side: params.side,
     notionalUsd: params.notionalUsd,
-    price,
-    quantity,
-    status: rejectedReason ? 'REJECTED_RISK' : 'FILLED',
+    price: 0,
+    quantity: 0,
+    status: 'REJECTED_RISK',
     mode: 'demo-vault',
     source: 'manual',
-    reason: rejectedReason ?? 'Executed in Local Demo Vault',
+    reason: offlineReason,
   }
 
-  if (!rejectedReason) {
-    fallbackExchange = {
-      ...fallbackExchange,
-      dailyOrderCount: fallbackExchange.dailyOrderCount + 1,
-      orders: [order, ...fallbackExchange.orders].slice(0, 40),
-    }
-  } else {
-    fallbackExchange = {
-      ...fallbackExchange,
-      orders: [order, ...fallbackExchange.orders].slice(0, 40),
-    }
+  fallbackExchange = {
+    ...fallbackExchange,
+    orders: [order, ...fallbackExchange.orders].slice(0, 40),
   }
 
   return {
-    ok: !rejectedReason,
-    error: rejectedReason ?? undefined,
+    ok: false,
+    error: offlineReason,
     order,
     bot: buildFallbackSnapshot(),
   }
@@ -746,26 +778,14 @@ export async function fetchBotAccuracyAudit(
   const targetPresets = evaluateAll ? STRATEGY_PRESETS : [fallbackPreset]
   const reports = await Promise.all(
     targetPresets.map(async (preset) => {
-      try {
-        const candles = await binanceSource.getCandles({
-          pair: preset.strategy.pair,
-          interval: preset.timeframe,
-          limit: 300,
-        })
-        return {
-          ...evaluateBotPresetAccuracy(candles, preset),
-          dataSource: 'binance',
-        }
-      } catch {
-        const candles = await syntheticSource.getCandles({
-          pair: preset.strategy.pair,
-          interval: preset.timeframe,
-          limit: 300,
-        })
-        return {
-          ...evaluateBotPresetAccuracy(candles, preset),
-          dataSource: 'synthetic-fallback',
-        }
+      const candles = await binanceSource.getCandles({
+        pair: preset.strategy.pair,
+        interval: preset.timeframe,
+        limit: 300,
+      })
+      return {
+        ...evaluateBotPresetAccuracy(candles, preset),
+        dataSource: 'binance',
       }
     }),
   )
@@ -862,7 +882,9 @@ export async function fetchPolymarketSnapshot(
 export function subscribeToBotStream(
   onSnapshot: (snapshot: BotServerSnapshot) => void,
 ): () => void {
-  const streamUrl = `${resolvedBaseUrl ?? '/api'}/bot/stream`
+  const streamUrl = appendStreamAuthToken(
+    `${resolvedBaseUrl ?? '/api'}/bot/stream`,
+  )
   let eventSource: EventSource | null = null
   let fallbackInterval: ReturnType<typeof setInterval> | null = null
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
@@ -969,4 +991,131 @@ export function subscribeToBotStream(
     eventSource?.close()
     eventSource = null
   }
+}
+
+export type GatewayMarketCandlesResponse = {
+  pair: string
+  interval: Interval
+  candles: Candle[]
+  source: 'binance' | 'binance-cache'
+  latencyMs: number
+}
+
+export type GatewayMarketStreamEvent =
+  | {
+      type: 'snapshot'
+      pair: string
+      interval: Interval
+      source: 'binance' | 'binance-cache'
+      candles: Candle[]
+      status: string
+    }
+  | {
+      type: 'candle'
+      pair: string
+      interval: Interval
+      candle: Candle
+      isClosed: boolean
+      gapRecovered?: boolean
+    }
+  | {
+      type: 'status'
+      pair: string
+      interval: Interval
+      status: string
+    }
+
+/**
+ * Fetches candles through FLARE's shared server-side market-data gateway (`/api/market/candles`).
+ * Returns `null` when the backend server is unavailable so hooks can degrade gracefully.
+ */
+export async function fetchMarketCandlesFromGateway(
+  pair: string,
+  interval: Interval,
+  limit: number,
+  signal?: AbortSignal,
+): Promise<GatewayMarketCandlesResponse | null> {
+  const qs = `pair=${encodeURIComponent(pair)}&interval=${encodeURIComponent(interval)}&limit=${encodeURIComponent(String(limit))}`
+  const res = await fetchFromBackend<GatewayMarketCandlesResponse>(
+    `/market/candles?${qs}`,
+    { method: 'GET', signal },
+  )
+  if (!res || !Array.isArray(res.data.candles) || res.data.candles.length === 0) {
+    return null
+  }
+  return res.data
+}
+
+/**
+ * Subscribes to FLARE's shared server-side market-data SSE stream (`/api/market/stream`)
+ * to avoid opening duplicate per-tab Binance WebSockets.
+ */
+export function subscribeToMarketGatewayStream(
+  pair: string,
+  interval: Interval,
+  limit: number,
+  onEvent: (event: GatewayMarketStreamEvent) => void,
+  onUnavailable: () => void,
+): () => void {
+  if (typeof EventSource === 'undefined') {
+    onUnavailable()
+    return () => {}
+  }
+
+  const base = resolvedBaseUrl ?? '/api'
+  const qs = `pair=${encodeURIComponent(pair)}&interval=${encodeURIComponent(interval)}&limit=${encodeURIComponent(String(limit))}`
+  const url = appendStreamAuthToken(`${base}/market/stream?${qs}`)
+  let disposed = false
+  let opened = false
+  let es: EventSource | null = null
+
+  try {
+    es = new EventSource(url)
+    es.onopen = () => {
+      opened = true
+    }
+    es.onmessage = (msg) => {
+      if (disposed) return
+      opened = true
+      try {
+        const parsed = JSON.parse(msg.data) as GatewayMarketStreamEvent
+        onEvent(parsed)
+      } catch {
+        // Ignore malformed gateway frame
+      }
+    }
+    es.onerror = () => {
+      if (disposed) return
+      if (!opened) {
+        es?.close()
+        es = null
+        onUnavailable()
+      }
+    }
+  } catch {
+    onUnavailable()
+  }
+
+  return () => {
+    disposed = true
+    es?.close()
+    es = null
+  }
+}
+
+export async function getTenantLedger(): Promise<Record<string, unknown> | null> {
+  const res = await fetchFromBackend<Record<string, unknown>>('/ledger', {
+    method: 'GET',
+  })
+  return res?.data ?? null
+}
+
+export async function getTenantAudit(
+  limit = 100,
+): Promise<Record<string, unknown> | null> {
+  const res = await fetchFromBackend<Record<string, unknown>>(
+    `/audit?limit=${encodeURIComponent(String(limit))}`,
+    { method: 'GET' },
+  )
+  return res?.data ?? null
 }

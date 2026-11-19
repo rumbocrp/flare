@@ -6,10 +6,14 @@ import path from 'node:path'
 import { Readable } from 'node:stream'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { STRATEGY_PRESETS, createInitialBotState } from '../botEngine'
+import { syntheticSource } from '../market/synthetic'
 import {
   clearCandleCache,
   fetchOptimizedCandles,
   getCacheMetrics,
+  resetCandleMarketSource,
+  setCandleMarketSource,
+  UpstreamMarketDataError,
 } from './candleCache'
 import {
   flushStatePersistence,
@@ -35,14 +39,19 @@ import {
   resetMt5BridgeTelemetry,
   toMt5Symbol,
 } from './mt5Bridge'
+import { closeStateStore, resetStateStore } from './store'
 
 describe('Backend Server Optimization & Runtime (candleCache + botRuntime + exchangeAdapter + mt5Bridge)', () => {
   const previousStateFileEnv = process.env.FLARE_STATE_FILE
+  const previousDbPathEnv = process.env.FLARE_DB_PATH
   let tempTestDir = ''
 
-  beforeAll(() => {
+  beforeAll(async () => {
     tempTestDir = fs.mkdtempSync(path.join(os.tmpdir(), 'flare-server-test-'))
     process.env.FLARE_STATE_FILE = path.join(tempTestDir, 'bot-state.json')
+    process.env.FLARE_DB_PATH = path.join(tempTestDir, 'flare.db')
+    await resetStateStore(process.env.FLARE_DB_PATH)
+    setCandleMarketSource(syntheticSource)
     resetExchangeDemoVault()
     resetMt5BridgeTelemetry()
   })
@@ -451,12 +460,12 @@ describe('Backend Server Optimization & Runtime (candleCache + botRuntime + exch
       writableEnded: false,
       destroyed: false,
       writableNeedDrain: false,
-      writeHead: () => {},
+      writeHead: () => { },
       write: (chunk: string | Buffer) => {
         chunks.push(typeof chunk === 'string' ? chunk : chunk.toString('utf8'))
         return true
       },
-      end: () => {},
+      end: () => { },
     }) as unknown as http.ServerResponse
 
     const streamHandled = await handleBotApiRequest(streamReq, streamRes)
@@ -482,8 +491,8 @@ describe('Backend Server Optimization & Runtime (candleCache + botRuntime + exch
     mutateReq.method = 'POST'
     mutateReq.url = '/api/exchange/limits'
     const mutateRes = {
-      writeHead: () => {},
-      end: () => {},
+      writeHead: () => { },
+      end: () => { },
     } as unknown as http.ServerResponse
     const mutated = await handleBotApiRequest(mutateReq, mutateRes)
     expect(mutated).toBe(true)
@@ -509,12 +518,48 @@ describe('Backend Server Optimization & Runtime (candleCache + botRuntime + exch
     resetExchangeDemoVault()
   })
 
+  it('refuses simulated fallback candles and hardcoded order fill prices when upstream fails', async () => {
+    clearCandleCache()
+    setCandleMarketSource({
+      name: 'Failing Upstream',
+      description: 'Simulated upstream outage for fail-closed verification',
+      async getCandles() {
+        throw new Error('Upstream exchange unreachable')
+      },
+    })
+    try {
+      await expect(
+        fetchOptimizedCandles('BTC/USDT', '15m', 60),
+      ).rejects.toThrow(UpstreamMarketDataError)
+
+      resetExchangeDemoVault()
+      const res = await submitExchangeOrder({
+        pair: 'BTC/USDT',
+        side: 'BUY',
+        notionalUsd: 100,
+        clientOrderId: 'cid-no-live-price',
+      })
+      expect(res.ok).toBe(false)
+      expect(res.order.status).toBe('REJECTED_RISK')
+      expect(res.order.price).toBe(0)
+      expect(res.error).toContain('live upstream market price unavailable')
+    } finally {
+      setCandleMarketSource(syntheticSource)
+      clearCandleCache()
+      resetExchangeDemoVault()
+    }
+  })
+
   afterAll(async () => {
+    resetCandleMarketSource()
     await flushStatePersistence()
     stopBackgroundWorker()
     await flushStatePersistence()
+    await closeStateStore()
     if (previousStateFileEnv === undefined) delete process.env.FLARE_STATE_FILE
     else process.env.FLARE_STATE_FILE = previousStateFileEnv
+    if (previousDbPathEnv === undefined) delete process.env.FLARE_DB_PATH
+    else process.env.FLARE_DB_PATH = previousDbPathEnv
     if (tempTestDir) {
       fs.rmSync(tempTestDir, { recursive: true, force: true })
     }

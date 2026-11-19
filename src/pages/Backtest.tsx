@@ -1,4 +1,11 @@
-import { useMemo, useState, type ChangeEvent, type FormEvent } from 'react'
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type FormEvent,
+} from 'react'
 import {
   ArrowRight,
   BarChart3,
@@ -7,11 +14,11 @@ import {
 } from 'lucide-react'
 import {
   createBacktestSnapshot,
-  runBacktest,
   type BacktestConfig,
   type BacktestResult,
   type BacktestSnapshot,
 } from '@/backtest'
+import { runBacktestOffloaded } from '@/workers/backtestClient'
 import EquityChart from '@/components/EquityChart'
 import MetricCard from '@/components/MetricCard'
 import NumberField from '@/components/NumberField'
@@ -153,6 +160,18 @@ function Backtest({ strategy, onNavigate, onSaveResult }: BacktestProps) {
   const [reloadKey, setReloadKey] = useState(0)
   const [result, setResult] = useState<BacktestResult | null>(null)
   const [runError, setRunError] = useState<string | null>(null)
+  const [isRunningJob, setIsRunningJob] = useState(false)
+  const [lastExecMeta, setLastExecMeta] = useState<{
+    durationMs: number
+    executedIn: 'worker' | 'main-thread'
+  } | null>(null)
+  const jobAbortRef = useRef<AbortController | null>(null)
+
+  useEffect(() => {
+    return () => {
+      jobAbortRef.current?.abort()
+    }
+  }, [])
 
   const state = useCandles(
     marketDataSource,
@@ -203,7 +222,7 @@ function Backtest({ strategy, onNavigate, onSaveResult }: BacktestProps) {
     setValues((current) => ({ ...current, [name]: value }))
   }
 
-  function handleRun(event?: FormEvent<HTMLFormElement>) {
+  async function handleRun(event?: FormEvent<HTMLFormElement>) {
     event?.preventDefault()
 
     if (state.status !== 'success') {
@@ -233,15 +252,34 @@ function Backtest({ strategy, onNavigate, onSaveResult }: BacktestProps) {
       },
     }
 
+    jobAbortRef.current?.abort()
+    const controller = new AbortController()
+    jobAbortRef.current = controller
+    setIsRunningJob(true)
+    setRunError(null)
+
     try {
-      const next = runBacktest(state.data, config)
-      setResult(next)
-      setRunError(null)
-      onSaveResult(createBacktestSnapshot(next))
+      const output = await runBacktestOffloaded(
+        state.data,
+        config,
+        controller.signal,
+      )
+      if (controller.signal.aborted) return
+      setResult(output.result)
+      setLastExecMeta({
+        durationMs: output.durationMs,
+        executedIn: output.executedIn,
+      })
+      onSaveResult(createBacktestSnapshot(output.result))
     } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return
       setRunError(
         error instanceof Error ? error.message : t('backtest.fixFields'),
       )
+    } finally {
+      if (jobAbortRef.current === controller) {
+        setIsRunningJob(false)
+      }
     }
   }
 
@@ -554,7 +592,7 @@ function Backtest({ strategy, onNavigate, onSaveResult }: BacktestProps) {
               type="submit"
               variant="default"
               size="sm"
-              disabled={state.status !== 'success'}
+              disabled={state.status !== 'success' || isRunningJob}
             >
               <Play className="size-3.5 fill-current" />
               <span>{t('backtest.run')}</span>
@@ -571,7 +609,9 @@ function Backtest({ strategy, onNavigate, onSaveResult }: BacktestProps) {
                 ? runError
                 : hasErrors
                   ? t('backtest.fixFields')
-                  : t('backtest.configApplied')}
+                  : lastExecMeta
+                    ? `${t('backtest.configApplied')} · ${lastExecMeta.executedIn} (${lastExecMeta.durationMs}ms)`
+                    : t('backtest.configApplied')}
             </span>
           </CardFooter>
         </Card>

@@ -1,3 +1,4 @@
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import type http from 'node:http'
 import path from 'node:path'
@@ -19,16 +20,27 @@ import {
   type ExecutablePredictionQuote,
 } from '../market/quoteService'
 import { evaluateTimeframePredictions } from '../predictions'
-import { isStrategy } from '../strategy'
+import { availablePairs, isStrategy } from '../strategy'
 import type { Interval, Strategy } from '../types'
+import {
+  authenticateRequest,
+  authorizePermission,
+  checkRateLimit,
+  resolveCorsHeaders,
+  type AuthPrincipal,
+  type Permission,
+} from './auth'
+import { getSharedStateAdapter } from './cache/sharedState'
 import {
   fetchOptimizedCandles,
   getCacheMetrics,
+  UpstreamMarketDataError,
   type ServerCacheMetrics,
 } from './candleCache'
 import {
   exportExchangeState,
   getExchangeStatusSnapshot,
+  getTenantLedgerSnapshot,
   resetEmergencyKillSwitch,
   resetExchangeDemoVault,
   restoreExchangeState,
@@ -39,11 +51,22 @@ import {
   type HardRiskLimits,
   type PersistedExchangeState,
 } from './exchangeAdapter'
+import {
+  getMarketGateway,
+  type MarketGatewayMetrics,
+} from './marketData/marketGateway'
 import { getMt5BridgeSnapshot, registerMt5Poll } from './mt5Bridge'
 import {
   fetchPolymarketUpDown,
   type PolymarketTimeframe,
 } from './polymarketAdapter'
+import {
+  closeStateStore,
+  getStateStore,
+  SqliteStateStore,
+  type AuditEventRecord,
+  type PersistedTenantEnvelope,
+} from './store'
 
 const POLL_INTERVAL_MS = 15_000
 const SSE_KEEPALIVE_MS = 25_000
@@ -54,6 +77,8 @@ const MAX_BODY_BYTES = 64 * 1024
 const MAX_RUNTIME_HISTORY_ITEMS = 500
 const CANDLE_LOOKBACK_LIMIT = 500
 const CURRENT_STATE_SCHEMA_VERSION = 2
+const DEFAULT_TENANT_ID = 'default'
+const VALID_INTERVALS = new Set<Interval>(['5m', '15m', '1h', '4h', '1d'])
 
 function getStateFilePath(): string {
   const custom = process.env.FLARE_STATE_FILE?.trim()
@@ -95,6 +120,7 @@ class InvalidJsonBodyError extends Error {
 type PersistedEnvelope = {
   schemaVersion?: number
   savedAt?: string
+  tenantId?: string
   presetId: string
   customStrategy?: Strategy
   isRunning?: boolean
@@ -112,45 +138,159 @@ type ServerTelemetry = {
   lastDataSource: string | null
   lastQuote: ExecutablePredictionQuote | null
   lastQuoteError: string | null
+  storeDriver: string
+  sharedStateBackend: string
+  marketGateway: MarketGatewayMetrics
   cache: ServerCacheMetrics
 }
 
-let isRunning = false
-let activePreset: StrategyPreset = STRATEGY_PRESETS[1]
-let engineState: BotEngineState = createInitialBotState(activePreset)
-let lastTickAt: string | null = null
-let lastTickLatencyMs = 0
-let tickCount = 0
-let sseSeq = 0
-let lastDataSource: string | null = null
-let lastDataGuardLogAt = 0
-let lastQuote: ExecutablePredictionQuote | null = null
-let lastQuoteError: string | null = null
-let tickInProgress = false
+type TenantRuntime = {
+  tenantId: string
+  isRunning: boolean
+  activePreset: StrategyPreset
+  engineState: BotEngineState
+  lastTickAt: string | null
+  lastTickLatencyMs: number
+  tickCount: number
+  sseSeq: number
+  lastDataSource: string | null
+  lastDataGuardLogAt: number
+  lastQuote: ExecutablePredictionQuote | null
+  lastQuoteError: string | null
+  tickInProgress: boolean
+  sseClients: Set<http.ServerResponse>
+  hydrated: boolean
+}
+
+const tenantRuntimes = new Map<string, TenantRuntime>()
+const marketSseClients = new Set<http.ServerResponse>()
 let moduleWorkerStarted = false
 let persistScheduled = false
 let persistChain: Promise<void> = Promise.resolve()
 const startedAtMs = Date.now()
 
-const sseClients = new Set<http.ServerResponse>()
-
-function buildEnvelopePayload(): PersistedEnvelope {
+function createFreshTenantRuntime(tenantId: string): TenantRuntime {
+  const preset = STRATEGY_PRESETS[1]
   return {
-    schemaVersion: CURRENT_STATE_SCHEMA_VERSION,
-    savedAt: new Date().toISOString(),
-    presetId: activePreset.id,
-    customStrategy: activePreset.strategy,
-    isRunning,
-    state: engineState,
-    exchange: exportExchangeState(),
+    tenantId,
+    isRunning: false,
+    activePreset: preset,
+    engineState: createInitialBotState(preset),
+    lastTickAt: null,
+    lastTickLatencyMs: 0,
+    tickCount: 0,
+    sseSeq: 0,
+    lastDataSource: null,
+    lastDataGuardLogAt: 0,
+    lastQuote: null,
+    lastQuoteError: null,
+    tickInProgress: false,
+    sseClients: new Set(),
+    hydrated: false,
   }
 }
 
-export function loadStateFromDisk(customFilePath?: string): {
+function applyEnvelopeToTenant(
+  rt: TenantRuntime,
+  parsed: PersistedEnvelope | BotEngineState,
+): boolean {
+  if ('state' in parsed && parsed.state && typeof parsed.presetId === 'string') {
+    const found = STRATEGY_PRESETS.find((p) => p.id === parsed.presetId)
+    if (found) {
+      rt.activePreset =
+        parsed.customStrategy && isStrategy(parsed.customStrategy)
+          ? {
+            ...found,
+            strategy: parsed.customStrategy,
+          }
+          : found
+    }
+    rt.engineState = trimBotEngineHistory(
+      normalizeBotEngineState(parsed.state),
+      {
+        maxClosedTrades: MAX_RUNTIME_HISTORY_ITEMS,
+        maxResolvedTickets: MAX_RUNTIME_HISTORY_ITEMS,
+      },
+    )
+    if (parsed.exchange) {
+      restoreExchangeState(parsed.exchange, rt.tenantId)
+    }
+    const exchangeSnap = getExchangeStatusSnapshot(rt.tenantId)
+    // Fail closed on startup if kill-switch or daily circuit breaker was tripped
+    rt.isRunning =
+      Boolean(parsed.isRunning) &&
+      !exchangeSnap.killSwitchActive &&
+      !rt.engineState.dayHalted
+    return true
+  }
+
+  if ('balance' in parsed && 'logs' in parsed) {
+    rt.engineState = trimBotEngineHistory(normalizeBotEngineState(parsed), {
+      maxClosedTrades: MAX_RUNTIME_HISTORY_ITEMS,
+      maxResolvedTickets: MAX_RUNTIME_HISTORY_ITEMS,
+    })
+    return true
+  }
+
+  return false
+}
+
+function hydrateTenantFromStoreSync(rt: TenantRuntime): void {
+  if (rt.hydrated) return
+  rt.hydrated = true
+  try {
+    const store = getStateStore()
+    if (store instanceof SqliteStateStore) {
+      const snap = store.loadTenantSnapshotSync(rt.tenantId)
+      if (snap) {
+        applyEnvelopeToTenant(rt, snap)
+      }
+    }
+  } catch (err) {
+    console.error(
+      `[FLARE Backend] Failed to hydrate tenant ${rt.tenantId} from SQL store:`,
+      err,
+    )
+  }
+}
+
+function getTenantRuntime(tenantId = DEFAULT_TENANT_ID): TenantRuntime {
+  let rt = tenantRuntimes.get(tenantId)
+  if (!rt) {
+    rt = createFreshTenantRuntime(tenantId)
+    tenantRuntimes.set(tenantId, rt)
+    hydrateTenantFromStoreSync(rt)
+  }
+  return rt
+}
+
+function buildEnvelopePayload(
+  tenantId = DEFAULT_TENANT_ID,
+): PersistedTenantEnvelope {
+  const rt = getTenantRuntime(tenantId)
+  return {
+    schemaVersion: CURRENT_STATE_SCHEMA_VERSION,
+    savedAt: new Date().toISOString(),
+    tenantId,
+    presetId: rt.activePreset.id,
+    customStrategy: rt.activePreset.strategy,
+    isRunning: rt.isRunning,
+    state: rt.engineState,
+    exchange: exportExchangeState(tenantId),
+  }
+}
+
+export function loadStateFromDisk(
+  customFilePath?: string,
+  tenantId = DEFAULT_TENANT_ID,
+): {
   loaded: boolean
   quarantinedFile?: string
 } {
-  const stateFile = customFilePath ? path.resolve(customFilePath) : getStateFilePath()
+  const rt = getTenantRuntime(tenantId)
+  const stateFile = customFilePath
+    ? path.resolve(customFilePath)
+    : getStateFilePath()
   if (!fs.existsSync(stateFile)) {
     return { loaded: false }
   }
@@ -158,45 +298,14 @@ export function loadStateFromDisk(customFilePath?: string): {
   try {
     raw = fs.readFileSync(stateFile, 'utf8')
     const parsed = JSON.parse(raw) as BotEngineState | PersistedEnvelope
-
-    if ('state' in parsed && parsed.state && typeof parsed.presetId === 'string') {
-      const found = STRATEGY_PRESETS.find((p) => p.id === parsed.presetId)
-      if (found) {
-        activePreset =
-          parsed.customStrategy && isStrategy(parsed.customStrategy)
-            ? {
-                ...found,
-                strategy: parsed.customStrategy,
-              }
-            : found
-      }
-      engineState = trimBotEngineHistory(
-        normalizeBotEngineState(parsed.state),
-        {
-          maxClosedTrades: MAX_RUNTIME_HISTORY_ITEMS,
-          maxResolvedTickets: MAX_RUNTIME_HISTORY_ITEMS,
-        },
-      )
-      if (parsed.exchange) {
-        restoreExchangeState(parsed.exchange)
-      }
-      const exchangeSnap = getExchangeStatusSnapshot()
-      // Fail closed on startup if kill-switch or daily circuit breaker was tripped
-      isRunning =
-        Boolean(parsed.isRunning) &&
-        !exchangeSnap.killSwitchActive &&
-        !engineState.dayHalted
-      return { loaded: true }
+    const applied = applyEnvelopeToTenant(rt, parsed)
+    if (applied) {
+      const env = buildEnvelopePayload(tenantId)
+      void getStateStore()
+        .saveTenantSnapshot(env)
+        .catch(() => { })
     }
-
-    if ('balance' in parsed && 'logs' in parsed) {
-      engineState = trimBotEngineHistory(normalizeBotEngineState(parsed), {
-        maxClosedTrades: MAX_RUNTIME_HISTORY_ITEMS,
-        maxResolvedTickets: MAX_RUNTIME_HISTORY_ITEMS,
-      })
-      return { loaded: true }
-    }
-    return { loaded: false }
+    return { loaded: applied }
   } catch (err) {
     const quarantinePath = `${stateFile}.corrupt.${Date.now()}.json`
     try {
@@ -215,15 +324,36 @@ export function loadStateFromDisk(customFilePath?: string): {
 }
 
 /**
- * Synchronous atomic disk flush used on startup/shutdown and deterministic tests.
+ * Synchronous atomic flush to SQL store (and optional JSON snapshot file when
+ * `customFilePath` or `FLARE_STATE_FILE` is specified).
  */
-export function flushStateToDiskSync(customFilePath?: string): void {
-  const stateFile = customFilePath ? path.resolve(customFilePath) : getStateFilePath()
+export function flushStateToDiskSync(
+  customFilePath?: string,
+  tenantId = DEFAULT_TENANT_ID,
+): void {
+  const envelope = buildEnvelopePayload(tenantId)
+  try {
+    const store = getStateStore()
+    if (store instanceof SqliteStateStore) {
+      store.saveTenantSnapshotSync(envelope)
+    }
+  } catch (err) {
+    console.error('[FLARE Backend] Failed to flush state to SQL store:', err)
+  }
+
+  const shouldWriteJsonFile = Boolean(
+    customFilePath || process.env.FLARE_STATE_FILE?.trim(),
+  )
+  if (!shouldWriteJsonFile) return
+
+  const stateFile = customFilePath
+    ? path.resolve(customFilePath)
+    : getStateFilePath()
   try {
     const dir = path.dirname(stateFile)
     fs.mkdirSync(dir, { recursive: true })
     const tmpFile = `${stateFile}.${process.pid}.tmp`
-    const json = JSON.stringify(buildEnvelopePayload(), null, 2)
+    const json = JSON.stringify(envelope, null, 2)
     fs.writeFileSync(tmpFile, json, 'utf8')
     fs.renameSync(tmpFile, stateFile)
   } catch (err) {
@@ -231,11 +361,26 @@ export function flushStateToDiskSync(customFilePath?: string): void {
   }
 }
 
-/**
- * Coalesces concurrent mutations into serialized async atomic `.tmp` -> rename
- * writes so HTTP/SSE ticks never stall the Node event loop (`P0-2`).
- */
-function saveStateToDisk(): void {
+function saveStateToDisk(tenantId = DEFAULT_TENANT_ID): void {
+  const envelope = buildEnvelopePayload(tenantId)
+  try {
+    const store = getStateStore()
+    if (store instanceof SqliteStateStore) {
+      store.saveTenantSnapshotSync(envelope)
+    } else {
+      persistChain = persistChain.then(async () => {
+        await store.saveTenantSnapshot(envelope).catch((err) => {
+          console.error('[FLARE Backend] SQL store save failed:', err)
+        })
+      })
+    }
+  } catch (err) {
+    console.error('[FLARE Backend] Failed to persist tenant state:', err)
+  }
+
+  const customJson = process.env.FLARE_STATE_FILE?.trim()
+  if (!customJson) return
+
   if (persistScheduled) return
   persistScheduled = true
   persistChain = persistChain.then(async () => {
@@ -245,7 +390,7 @@ function saveStateToDisk(): void {
       const dir = path.dirname(stateFile)
       await fs.promises.mkdir(dir, { recursive: true })
       const tmpFile = `${stateFile}.${process.pid}.tmp`
-      const json = JSON.stringify(buildEnvelopePayload(), null, 2)
+      const json = JSON.stringify(buildEnvelopePayload(tenantId), null, 2)
       await fs.promises.writeFile(tmpFile, json, 'utf8')
       await fs.promises.rename(tmpFile, stateFile)
     } catch (err) {
@@ -258,81 +403,139 @@ export async function flushStatePersistence(): Promise<void> {
   await persistChain
 }
 
-loadStateFromDisk()
+function recordAudit(
+  principal: AuthPrincipal,
+  action: string,
+  resource: string,
+  outcome: AuditEventRecord['outcome'],
+  details?: Record<string, string | number | boolean | null>,
+): void {
+  const event: AuditEventRecord = {
+    id: `AUD-${crypto.randomUUID()}`,
+    tenantId: principal.tenantId,
+    timestamp: new Date().toISOString(),
+    actor: principal.subject,
+    role: principal.role,
+    action,
+    resource,
+    outcome,
+    details,
+  }
+  void getStateStore()
+    .appendAuditEvent(event)
+    .catch(() => { })
+}
 
-export function getTelemetry(): ServerTelemetry {
+// Bootstrap default tenant from SQL store (and one-time legacy JSON fallback if present)
+{
+  const defaultRt = getTenantRuntime(DEFAULT_TENANT_ID)
+  const store = getStateStore()
+  const hasSqlSnapshot =
+    store instanceof SqliteStateStore
+      ? store.loadTenantSnapshotSync(DEFAULT_TENANT_ID) !== null
+      : false
+  if (!hasSqlSnapshot && fs.existsSync(getStateFilePath())) {
+    loadStateFromDisk(undefined, DEFAULT_TENANT_ID)
+  }
+  defaultRt.hydrated = true
+}
+
+export function getTelemetry(tenantId = DEFAULT_TENANT_ID): ServerTelemetry {
+  const rt = getTenantRuntime(tenantId)
   return {
     uptimeSec: Math.floor((Date.now() - startedAtMs) / 1000),
-    lastTickAt,
-    lastTickLatencyMs,
-    tickCount,
-    connectedStreamClients: sseClients.size,
-    sseSeq,
-    lastDataSource,
-    lastQuote,
-    lastQuoteError,
+    lastTickAt: rt.lastTickAt,
+    lastTickLatencyMs: rt.lastTickLatencyMs,
+    tickCount: rt.tickCount,
+    connectedStreamClients: rt.sseClients.size,
+    sseSeq: rt.sseSeq,
+    lastDataSource: rt.lastDataSource,
+    lastQuote: rt.lastQuote,
+    lastQuoteError: rt.lastQuoteError,
+    storeDriver: getStateStore().driver,
+    sharedStateBackend: getSharedStateAdapter().backend,
+    marketGateway: getMarketGateway().getMetrics(),
     cache: getCacheMetrics(),
   }
 }
 
-export function getBotStatusSnapshot() {
-  const exchange = getExchangeStatusSnapshot()
+export function getBotStatusSnapshot(tenantId = DEFAULT_TENANT_ID) {
+  const rt = getTenantRuntime(tenantId)
+  const exchange = getExchangeStatusSnapshot(tenantId)
   return {
-    seq: sseSeq,
+    seq: rt.sseSeq,
     frameType: 'snapshot' as const,
-    running: isRunning,
-    preset: activePreset,
+    tenantId,
+    running: rt.isRunning,
+    preset: rt.activePreset,
     presets: STRATEGY_PRESETS,
-    state: engineState,
-    telemetry: getTelemetry(),
+    state: rt.engineState,
+    telemetry: getTelemetry(tenantId),
     exchange,
-    mt5: getMt5BridgeSnapshot(engineState, activePreset, exchange),
+    mt5: getMt5BridgeSnapshot(rt.engineState, rt.activePreset, exchange),
   }
 }
 
-function getBotDeltaPayload() {
-  const exchange = getExchangeStatusSnapshot()
+function getBotDeltaSnapshot(tenantId = DEFAULT_TENANT_ID) {
+  const rt = getTenantRuntime(tenantId)
+  const exchange = getExchangeStatusSnapshot(tenantId)
   return {
-    seq: sseSeq,
+    seq: rt.sseSeq,
     frameType: 'delta' as const,
-    running: isRunning,
-    preset: activePreset,
-    state: engineState,
-    telemetry: getTelemetry(),
+    tenantId,
+    running: rt.isRunning,
+    preset: rt.activePreset,
+    state: rt.engineState,
+    telemetry: getTelemetry(tenantId),
     exchange,
-    mt5: getMt5BridgeSnapshot(engineState, activePreset, exchange),
+    mt5: getMt5BridgeSnapshot(rt.engineState, rt.activePreset, exchange),
   }
 }
 
-function writeSseFrame(client: http.ServerResponse, frame: string): boolean {
-  if (client.destroyed || client.writableEnded) {
-    sseClients.delete(client)
-    return false
+function writeSseFrame(
+  client: http.ServerResponse,
+  payload: string,
+  clientSet: Set<http.ServerResponse>,
+): void {
+  if (client.writableEnded || client.destroyed) {
+    clientSet.delete(client)
+    return
+  }
+  if (
+    client.writableNeedDrain ||
+    (typeof client.writableLength === 'number' &&
+      client.writableLength > SSE_MAX_BUFFERED_BYTES)
+  ) {
+    clientSet.delete(client)
+    try {
+      client.end()
+    } catch {
+      // Ignore already-closed stream errors
+    }
+    return
   }
   try {
-    const ok = client.write(frame)
-    if (!ok && client.writableLength > SSE_MAX_BUFFERED_BYTES) {
-      sseClients.delete(client)
-      try {
-        client.destroy()
-      } catch {
-        // Ignore cleanup failures on slow/stalled streams
-      }
-      return false
+    const ok = client.write(payload)
+    if (
+      !ok &&
+      typeof client.writableLength === 'number' &&
+      client.writableLength > SSE_MAX_BUFFERED_BYTES
+    ) {
+      clientSet.delete(client)
+      client.end()
     }
-    return true
   } catch {
-    sseClients.delete(client)
-    return false
+    clientSet.delete(client)
   }
 }
 
-function broadcastSseUpdate(): void {
-  if (sseClients.size === 0) return
-  sseSeq += 1
-  const data = `id: ${sseSeq}\ndata: ${JSON.stringify(getBotDeltaPayload())}\n\n`
-  for (const client of sseClients) {
-    writeSseFrame(client, data)
+function broadcastSseUpdate(tenantId = DEFAULT_TENANT_ID): void {
+  const rt = getTenantRuntime(tenantId)
+  rt.sseSeq += 1
+  if (rt.sseClients.size === 0) return
+  const payload = `id: ${rt.sseSeq}\ndata: ${JSON.stringify(getBotDeltaSnapshot(tenantId))}\n\n`
+  for (const client of Array.from(rt.sseClients)) {
+    writeSseFrame(client, payload, rt.sseClients)
   }
 }
 
@@ -340,181 +543,197 @@ async function resolvePredictionQuoteForPreset(
   preset: StrategyPreset,
   nowMs: number,
 ): Promise<{ quote: ExecutablePredictionQuote | null; error: string | null }> {
-  if (preset.timeframe !== '5m' && preset.timeframe !== '15m') {
+  const rule = resolvePresetPredictionRule(preset)
+  if (!rule) {
+    return { quote: null, error: 'No prediction rule configured for preset.' }
+  }
+  if (rule.timeframe !== '5m' && rule.timeframe !== '15m') {
     return {
       quote: null,
-      error: `No live Polymarket CLOB quote stream for interval ${preset.timeframe}.`,
+      error: `No live Polymarket CLOB feed for ${rule.timeframe} contracts (${rule.id}).`,
     }
   }
   try {
-    const rule = resolvePresetPredictionRule(preset)
-    const outcome = rule?.predictedOutcome ?? 'YES'
-    const snap = await fetchPolymarketUpDown(preset.timeframe, 4, { nowMs })
-    const window = pickBestOpenPolymarketWindow(snap.windows, nowMs)
-    if (!window) {
+    const snapshot = await fetchPolymarketUpDown(rule.timeframe, 6)
+    const openWindow = pickBestOpenPolymarketWindow(snapshot.windows, nowMs)
+    if (!openWindow) {
       return {
         quote: null,
-        error:
-          snap.errors[0] ??
-          `No open Polymarket ${preset.timeframe} market window available.`,
+        error: `No open Polymarket ${rule.timeframe} window found.`,
       }
     }
-    const quote = buildQuoteFromPolymarketWindow(window, outcome, nowMs)
+    const asOfMs = Date.parse(snapshot.fetchedAt) || nowMs
+    const quote = buildQuoteFromPolymarketWindow(
+      openWindow,
+      rule.predictedOutcome,
+      asOfMs,
+    )
     if (!quote) {
       return {
         quote: null,
-        error: `Polymarket window ${window.slug} has no executable bid/ask quote.`,
+        error: `Open window ${openWindow.slug} has no executable bid/ask quote.`,
       }
     }
     return { quote, error: null }
   } catch (err) {
     return {
       quote: null,
-      error: `Quote fetch failed: ${err instanceof Error ? err.message : String(err)}`,
+      error: `Polymarket quote fetch failed: ${err instanceof Error ? err.message : String(err)}`,
     }
   }
 }
 
-/**
- * Runs one cycle of the bot engine behind a re-entrancy guard (`tickInProgress`)
- * so concurrent evaluations never overlap.
- */
-async function tickBot(options?: {
-  forceExecution?: boolean
-  forceCandleRefresh?: boolean
-}): Promise<void> {
-  if ((!isRunning && !options?.forceExecution) || tickInProgress) return
-
-  const exchangeSnap = getExchangeStatusSnapshot()
-  if (exchangeSnap.killSwitchActive) {
-    isRunning = false
+async function tickBot(
+  tenantId = DEFAULT_TENANT_ID,
+  options?: {
+    forceExecution?: boolean
+    forceCandleRefresh?: boolean
+  },
+): Promise<void> {
+  const rt = getTenantRuntime(tenantId)
+  if (rt.tickInProgress) return
+  if (!rt.isRunning && !options?.forceExecution) return
+  if (getExchangeStatusSnapshot(tenantId).killSwitchActive) {
+    rt.isRunning = false
     return
   }
 
-  tickInProgress = true
+  rt.tickInProgress = true
 
   const tickStart = Date.now()
   try {
-    const { candles, source, latencyMs } = await fetchOptimizedCandles(
-      activePreset.strategy.pair,
-      activePreset.timeframe,
-      CANDLE_LOOKBACK_LIMIT,
-      { forceRefresh: options?.forceCandleRefresh },
-    )
-    lastDataSource = source
-
-    if (!options?.forceExecution && source === 'synthetic-fallback') {
+    let candles
+    let source
+    let latencyMs: number
+    try {
+      const fetched = await getMarketGateway().getCandles(
+        rt.activePreset.strategy.pair,
+        rt.activePreset.timeframe,
+        CANDLE_LOOKBACK_LIMIT,
+        { forceRefresh: options?.forceCandleRefresh },
+      )
+      candles = fetched.candles
+      source = fetched.source
+      latencyMs = fetched.latencyMs
+      rt.lastDataSource = source
+    } catch (err) {
+      rt.lastDataSource = 'unavailable'
       const now = Date.now()
-      if (now - lastDataGuardLogAt >= DATA_GUARD_LOG_THROTTLE_MS) {
-        lastDataGuardLogAt = now
-        engineState = {
-          ...engineState,
-          logs: [
-            {
-              id: now,
-              timestamp: new Date(now).toISOString(),
-              level: 'risk' as const,
-              message:
-                '[DATA GUARD] Upstream exchange candles unavailable (synthetic-fallback active); blocking autonomous live evaluation.',
-            },
-            ...engineState.logs,
-          ].slice(0, 80),
+      if (now - rt.lastDataGuardLogAt >= DATA_GUARD_LOG_THROTTLE_MS) {
+        rt.lastDataGuardLogAt = now
+        const detail =
+          err instanceof Error ? err.message : 'Upstream market feed offline'
+        const guardLog: BotEngineLog = {
+          id: now,
+          timestamp: new Date(now).toISOString(),
+          level: 'risk',
+          message: `[DATA GUARD] ${detail} — blocking evaluation until live market data resumes.`,
         }
-        saveStateToDisk()
+        rt.engineState = {
+          ...rt.engineState,
+          logs: [guardLog, ...rt.engineState.logs].slice(0, 80),
+        }
+        saveStateToDisk(tenantId)
       }
-      broadcastSseUpdate()
+      broadcastSseUpdate(tenantId)
       return
     }
 
     const nowMs = Date.now()
     let predictionQuote: ExecutablePredictionQuote | null = null
-    if (activePreset.domain === 'prediction-market') {
-      const fetched = await resolvePredictionQuoteForPreset(activePreset, nowMs)
+    if (rt.activePreset.domain === 'prediction-market') {
+      const fetched = await resolvePredictionQuoteForPreset(
+        rt.activePreset,
+        nowMs,
+      )
       predictionQuote = fetched.quote
-      lastQuote = fetched.quote
-      lastQuoteError = fetched.error
+      rt.lastQuote = fetched.quote
+      rt.lastQuoteError = fetched.error
     } else {
-      lastQuote = null
-      lastQuoteError = null
+      rt.lastQuote = null
+      rt.lastQuoteError = null
     }
 
-    const prevTime = engineState.lastProcessedCandleTime
-    const prevOpenPosition = engineState.openPosition
-    const prevLatestTradeId = engineState.closedTrades[0]?.id ?? null
-    const prevLatestResolvedId = engineState.resolvedTickets[0]?.id ?? null
+    const prevTime = rt.engineState.lastProcessedCandleTime
+    const prevOpenEntryTime = rt.engineState.openPosition?.entryTime ?? null
+    const prevClosedCount = rt.engineState.closedTrades.length
 
-    const steppedState = stepBotEngine(engineState, candles, activePreset, {
-      // When the user triggers "Evaluate Candle Now", evaluate closed + latest candles;
-      // in live autonomous ticks, pass `nowMs` to prevent repainting open candles.
-      nowMs: options?.forceExecution ? undefined : nowMs,
-      predictionQuote,
-      requireExecutableQuote: true,
-    })
-    engineState = trimBotEngineHistory(steppedState, {
-      maxClosedTrades: MAX_RUNTIME_HISTORY_ITEMS,
-      maxResolvedTickets: MAX_RUNTIME_HISTORY_ITEMS,
-    })
+    rt.engineState = trimBotEngineHistory(
+      stepBotEngine(rt.engineState, candles, rt.activePreset, {
+        nowMs,
+        predictionQuote,
+        requireExecutableQuote: true,
+      }),
+      {
+        maxClosedTrades: MAX_RUNTIME_HISTORY_ITEMS,
+        maxResolvedTickets: MAX_RUNTIME_HISTORY_ITEMS,
+      },
+    )
 
-    let exchangeMutated = false
-    // Auto-mirror bot fills to the Exchange adapter with deterministic idempotency keys
-    if (exchangeSnap.autoMirrorBotOrders) {
-      if (!prevOpenPosition && engineState.openPosition) {
-        const pos = engineState.openPosition
-        const cappedNotional = Math.min(
-          pos.notional,
-          exchangeSnap.hardLimits.maxOrderNotionalUsd,
-        )
-        await submitExchangeOrder({
-          pair: pos.pair,
-          side: pos.side === 'buy' ? 'BUY' : 'SELL',
-          notionalUsd: cappedNotional,
-          referencePrice: pos.entryPrice,
-          source: 'bot-auto',
-          clientOrderId: `bot-entry-${pos.pair.replace('/', '')}-${pos.entryTime}`,
-        })
-        exchangeMutated = true
-      } else if (
-        engineState.closedTrades[0] &&
-        engineState.closedTrades[0].id !== prevLatestTradeId
-      ) {
-        const latestTrade = engineState.closedTrades[0]
-        if (latestTrade) {
-          const cappedNotional = Math.min(
-            latestTrade.entryPrice * latestTrade.size,
+    const exchangeSnap = getExchangeStatusSnapshot(tenantId)
+    if (exchangeSnap.autoMirrorBotOrders && !exchangeSnap.killSwitchActive) {
+      const newPos = rt.engineState.openPosition
+      if (newPos && newPos.entryTime !== prevOpenEntryTime) {
+        const orderRes = await submitExchangeOrder({
+          tenantId,
+          pair: newPos.pair,
+          side: newPos.side === 'buy' ? 'BUY' : 'SELL',
+          notionalUsd: Math.min(
+            newPos.notional,
             exchangeSnap.hardLimits.maxOrderNotionalUsd,
-          )
+          ),
+          referencePrice: newPos.entryPrice,
+          source: 'bot-auto',
+          clientOrderId: `bot-open-${rt.activePreset.id}-${newPos.entryTime}`,
+        })
+        const mirrorLog: BotEngineLog = {
+          id: Date.now(),
+          timestamp: new Date().toISOString(),
+          level: orderRes.ok ? 'trade' : 'risk',
+          message: orderRes.ok
+            ? `[BROKER AUTO-MIRROR] ${orderRes.order.side} ${orderRes.order.pair} $${orderRes.order.notionalUsd.toFixed(2)} USD (${orderRes.order.mode})`
+            : `[BROKER BLOCKED] ${orderRes.error}`,
+        }
+        rt.engineState = {
+          ...rt.engineState,
+          logs: [mirrorLog, ...rt.engineState.logs].slice(0, 80),
+        }
+      } else if (rt.engineState.closedTrades.length > prevClosedCount) {
+        const closed = rt.engineState.closedTrades[0]
+        if (closed) {
           await submitExchangeOrder({
-            pair: latestTrade.pair,
-            side: latestTrade.side === 'buy' ? 'SELL' : 'BUY',
-            notionalUsd: cappedNotional,
-            referencePrice: latestTrade.exitPrice,
-            realizedPnlUsd: latestTrade.pnl,
+            tenantId,
+            pair: closed.pair,
+            side: closed.side === 'buy' ? 'SELL' : 'BUY',
+            notionalUsd: Math.min(
+              closed.size,
+              exchangeSnap.hardLimits.maxOrderNotionalUsd,
+            ),
+            referencePrice: closed.exitPrice,
+            realizedPnlUsd: closed.pnl,
             source: 'bot-auto',
-            clientOrderId: `bot-exit-${latestTrade.pair.replace('/', '')}-${latestTrade.id}`,
+            clientOrderId: `bot-close-${rt.activePreset.id}-${closed.id}-${closed.exitTime}`,
           })
-          exchangeMutated = true
         }
       }
     }
 
-    lastTickAt = new Date().toISOString()
-    lastTickLatencyMs = latencyMs || Math.max(1, Date.now() - tickStart)
-    tickCount += 1
+    rt.tickCount += 1
+    rt.lastTickAt = new Date().toISOString()
+    rt.lastTickLatencyMs = Math.max(latencyMs, Date.now() - tickStart)
 
     if (
-      exchangeMutated ||
-      engineState.lastProcessedCandleTime !== prevTime ||
-      (engineState.closedTrades[0]?.id ?? null) !== prevLatestTradeId ||
-      (engineState.resolvedTickets[0]?.id ?? null) !== prevLatestResolvedId
+      rt.engineState.lastProcessedCandleTime !== prevTime ||
+      options?.forceExecution
     ) {
-      saveStateToDisk()
+      saveStateToDisk(tenantId)
     }
 
-    broadcastSseUpdate()
+    broadcastSseUpdate(tenantId)
   } catch (error) {
-    console.error('[FLARE Backend] Bot tick error:', error)
+    console.error(`[FLARE Backend] Bot tick error (${tenantId}):`, error)
   } finally {
-    tickInProgress = false
+    rt.tickInProgress = false
   }
 }
 
@@ -529,7 +748,30 @@ export function stopBackgroundWorker(): void {
     globals.keepaliveTimer = undefined
   }
   moduleWorkerStarted = false
-  flushStateToDiskSync()
+  for (const tenantId of tenantRuntimes.keys()) {
+    flushStateToDiskSync(undefined, tenantId)
+  }
+}
+
+export async function shutdownRuntime(): Promise<void> {
+  stopBackgroundWorker()
+  await flushStatePersistence()
+  getMarketGateway().closeAll()
+  await closeStateStore()
+}
+
+export function resetAllTenantRuntimes(): void {
+  for (const rt of tenantRuntimes.values()) {
+    for (const client of rt.sseClients) {
+      try {
+        client.end()
+      } catch {
+        // Ignore close errors
+      }
+    }
+    rt.sseClients.clear()
+  }
+  tenantRuntimes.clear()
 }
 
 export function ensureBackgroundWorker(): void {
@@ -541,15 +783,23 @@ export function ensureBackgroundWorker(): void {
   if (globals.keepaliveTimer) clearInterval(globals.keepaliveTimer)
 
   const pollTimer = setInterval(() => {
-    void tickBot()
+    for (const [tenantId, rt] of tenantRuntimes) {
+      if (rt.isRunning) {
+        void tickBot(tenantId)
+      }
+    }
   }, POLL_INTERVAL_MS)
   pollTimer.unref?.()
   globals.pollTimer = pollTimer
 
   const keepaliveTimer = setInterval(() => {
-    if (sseClients.size === 0) return
-    for (const client of sseClients) {
-      writeSseFrame(client, ': keepalive\n\n')
+    for (const rt of tenantRuntimes.values()) {
+      for (const client of Array.from(rt.sseClients)) {
+        writeSseFrame(client, ': keepalive\n\n', rt.sseClients)
+      }
+    }
+    for (const client of Array.from(marketSseClients)) {
+      writeSseFrame(client, ': keepalive\n\n', marketSseClients)
     }
   }, SSE_KEEPALIVE_MS)
   keepaliveTimer.unref?.()
@@ -560,15 +810,14 @@ function sendJson(
   res: http.ServerResponse,
   status: number,
   payload: unknown,
+  extraHeaders: Record<string, string> = {},
 ): void {
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
+    ...extraHeaders,
   })
-  res.end(JSON.stringify(payload))
+  res.end(payload === null ? undefined : JSON.stringify(payload))
 }
 
 async function readJsonBody<T>(req: http.IncomingMessage): Promise<T | null> {
@@ -597,22 +846,41 @@ async function readJsonBody<T>(req: http.IncomingMessage): Promise<T | null> {
 async function readOptionalJsonBody<T>(
   req: http.IncomingMessage,
   res: http.ServerResponse,
+  corsHeaders: Record<string, string>,
 ): Promise<{ ok: true; data: T | null } | { ok: false }> {
   try {
     const data = await readJsonBody<T>(req)
     return { ok: true, data }
   } catch (error) {
     if (error instanceof PayloadTooLargeError) {
-      sendJson(res, 413, { error: error.message })
+      sendJson(res, 413, { error: error.message }, corsHeaders)
       return { ok: false }
     }
     if (error instanceof InvalidJsonBodyError) {
-      sendJson(res, 400, { error: error.message })
+      sendJson(res, 400, { error: error.message }, corsHeaders)
       return { ok: false }
     }
-    sendJson(res, 400, { error: 'Failed to read request body' })
+    sendJson(res, 400, { error: 'Failed to read request body' }, corsHeaders)
     return { ok: false }
   }
+}
+
+function enforcePermission(
+  principal: AuthPrincipal,
+  permission: Permission,
+  res: http.ServerResponse,
+  headers: Record<string, string>,
+  resource: string,
+): boolean {
+  const check = authorizePermission(principal, permission)
+  if (!check.ok) {
+    recordAudit(principal, 'rbac:denied', resource, 'denied', {
+      requiredPermission: permission,
+    })
+    sendJson(res, check.status, { error: check.error }, headers)
+    return false
+  }
+  return true
 }
 
 /**
@@ -630,48 +898,139 @@ export async function handleBotApiRequest(
     return false
   }
 
+  const cors = resolveCorsHeaders(req)
+
   if (req.method === 'OPTIONS') {
-    sendJson(res, 204, null)
+    if (!cors.allowed) {
+      sendJson(res, 403, { error: 'CORS origin not allowed' }, cors.headers)
+      return true
+    }
+    sendJson(res, 204, null, cors.headers)
     return true
   }
 
   const url = new URL(rawUrl, 'http://localhost')
 
-  // 1. GET /api/health -> Server, latency, and cache diagnostics
+  // 1. GET /api/health -> Public liveness + authenticated tenant diagnostics
   if (req.method === 'GET' && url.pathname === '/api/health') {
-    sendJson(res, 200, {
-      status: 'ok',
-      running: isRunning,
-      activePresetId: activePreset.id,
-      telemetry: getTelemetry(),
-      exchange: getExchangeStatusSnapshot(),
+    const auth = authenticateRequest(req, url)
+    if (!auth.ok) {
+      sendJson(
+        res,
+        200,
+        {
+          status: 'ok',
+          storeDriver: getStateStore().driver,
+          sharedStateBackend: getSharedStateAdapter().backend,
+          marketGateway: getMarketGateway().getMetrics(),
+        },
+        cors.headers,
+      )
+      return true
+    }
+    const tenantId = auth.principal.tenantId
+    const rt = getTenantRuntime(tenantId)
+    sendJson(
+      res,
+      200,
+      {
+        status: 'ok',
+        tenantId,
+        running: rt.isRunning,
+        activePresetId: rt.activePreset.id,
+        telemetry: getTelemetry(tenantId),
+        exchange: getExchangeStatusSnapshot(tenantId),
+      },
+      cors.headers,
+    )
+    return true
+  }
+
+  // Authenticate all non-health API requests (`P0-3`)
+  const auth = authenticateRequest(req, url)
+  if (!auth.ok) {
+    sendJson(res, auth.status, { error: auth.error }, cors.headers)
+    return true
+  }
+  const principal = auth.principal
+  const tenantId = principal.tenantId
+
+  // Enforce per-principal sliding-window rate limits (`P0-3`)
+  const bucket = req.method === 'POST' ? 'write' : 'read'
+  const rl = await checkRateLimit(req, principal, bucket)
+  const responseHeaders: Record<string, string> = {
+    ...cors.headers,
+    'X-RateLimit-Limit': String(rl.limit),
+    'X-RateLimit-Remaining': String(rl.remaining),
+    'X-Tenant-Id': tenantId,
+  }
+  if (!rl.allowed) {
+    recordAudit(principal, 'rate_limit:exceeded', url.pathname, 'denied', {
+      bucket,
+      limit: rl.limit,
     })
+    sendJson(
+      res,
+      429,
+      {
+        error: `Rate limit exceeded (${rl.limit} ${bucket} req/min). Retry in ${rl.retryAfterSec}s.`,
+      },
+      {
+        ...responseHeaders,
+        'Retry-After': String(rl.retryAfterSec),
+      },
+    )
     return true
   }
 
-  // 2. GET /api/bot/status -> Full bot status, telemetry, demo exchange, and MT5 bridge
+  const rt = getTenantRuntime(tenantId)
+
+  // 2. GET /api/bot/status -> Tenant-scoped bot status, telemetry, demo exchange, and MT5 bridge
   if (req.method === 'GET' && url.pathname === '/api/bot/status') {
-    sendJson(res, 200, getBotStatusSnapshot())
+    if (
+      !enforcePermission(
+        principal,
+        'read:state',
+        res,
+        responseHeaders,
+        url.pathname,
+      )
+    ) {
+      return true
+    }
+    sendJson(res, 200, getBotStatusSnapshot(tenantId), responseHeaders)
     return true
   }
 
-  // 3. GET /api/bot/stream -> Real-time Server-Sent Events (SSE)
+  // 3. GET /api/bot/stream -> Tenant-scoped real-time SSE (`snapshot` + `delta` frames)
   if (req.method === 'GET' && url.pathname === '/api/bot/stream') {
+    if (
+      !enforcePermission(
+        principal,
+        'read:state',
+        res,
+        responseHeaders,
+        url.pathname,
+      )
+    ) {
+      return true
+    }
     res.writeHead(200, {
       'Content-Type': 'text/event-stream; charset=utf-8',
       'Cache-Control': 'no-cache, no-transform',
       Connection: 'keep-alive',
-      'Access-Control-Allow-Origin': '*',
+      ...responseHeaders,
     })
-    sseClients.add(res)
-    sseSeq += 1
+    rt.sseClients.add(res)
+    rt.sseSeq += 1
     writeSseFrame(
       res,
-      `id: ${sseSeq}\ndata: ${JSON.stringify(getBotStatusSnapshot())}\n\n`,
+      `id: ${rt.sseSeq}\ndata: ${JSON.stringify(getBotStatusSnapshot(tenantId))}\n\n`,
+      rt.sseClients,
     )
 
     const cleanupClient = () => {
-      sseClients.delete(res)
+      rt.sseClients.delete(res)
     }
     req.on('close', cleanupClient)
     res.on('close', cleanupClient)
@@ -679,58 +1038,256 @@ export async function handleBotApiRequest(
     return true
   }
 
+  // 3b. GET /api/market/candles -> Shared backend market-data gateway REST endpoint (`P1-1`)
+  if (req.method === 'GET' && url.pathname === '/api/market/candles') {
+    if (
+      !enforcePermission(
+        principal,
+        'read:state',
+        res,
+        responseHeaders,
+        url.pathname,
+      )
+    ) {
+      return true
+    }
+    const rawPair = (url.searchParams.get('pair') ?? 'BTC/USDT').toUpperCase()
+    const pair = availablePairs.includes(rawPair) ? rawPair : 'BTC/USDT'
+    const rawInterval = (url.searchParams.get('interval') ?? '15m') as Interval
+    const interval: Interval = VALID_INTERVALS.has(rawInterval)
+      ? rawInterval
+      : '15m'
+    const limit = Number(url.searchParams.get('limit') ?? 250)
+    const forceRefresh = url.searchParams.get('refresh') === 'true'
+    try {
+      const result = await getMarketGateway().getCandles(
+        pair,
+        interval,
+        Number.isFinite(limit) ? limit : 250,
+        { forceRefresh },
+      )
+      sendJson(
+        res,
+        200,
+        {
+          pair,
+          interval,
+          ...result,
+        },
+        responseHeaders,
+      )
+    } catch (err) {
+      const status = err instanceof UpstreamMarketDataError ? 503 : 502
+      sendJson(
+        res,
+        status,
+        { error: err instanceof Error ? err.message : String(err) },
+        responseHeaders,
+      )
+    }
+    return true
+  }
+
+  // 3c. GET /api/market/stream -> Shared server-side market-data SSE fanout (`P1-1`)
+  if (req.method === 'GET' && url.pathname === '/api/market/stream') {
+    if (
+      !enforcePermission(
+        principal,
+        'read:state',
+        res,
+        responseHeaders,
+        url.pathname,
+      )
+    ) {
+      return true
+    }
+    const rawPair = (url.searchParams.get('pair') ?? 'BTC/USDT').toUpperCase()
+    const pair = availablePairs.includes(rawPair) ? rawPair : 'BTC/USDT'
+    const rawInterval = (url.searchParams.get('interval') ?? '15m') as Interval
+    const interval: Interval = VALID_INTERVALS.has(rawInterval)
+      ? rawInterval
+      : '15m'
+    const limit = Number(url.searchParams.get('limit') ?? 200)
+
+    let initial
+    try {
+      initial = await getMarketGateway().getCandles(
+        pair,
+        interval,
+        Number.isFinite(limit) ? limit : 200,
+      )
+    } catch (err) {
+      const status = err instanceof UpstreamMarketDataError ? 503 : 502
+      sendJson(
+        res,
+        status,
+        { error: err instanceof Error ? err.message : String(err) },
+        responseHeaders,
+      )
+      return true
+    }
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      ...responseHeaders,
+    })
+
+    marketSseClients.add(res)
+    writeSseFrame(
+      res,
+      `data: ${JSON.stringify({
+        type: 'snapshot',
+        pair,
+        interval,
+        source: initial.source,
+        candles: initial.candles,
+        status: 'live',
+      })}\n\n`,
+      marketSseClients,
+    )
+
+    const unsubscribe = getMarketGateway().subscribe(
+      pair,
+      interval,
+      (event) => {
+        writeSseFrame(
+          res,
+          `data: ${JSON.stringify(event)}\n\n`,
+          marketSseClients,
+        )
+      },
+    )
+
+    let cleaned = false
+    const cleanup = () => {
+      if (cleaned) return
+      cleaned = true
+      marketSseClients.delete(res)
+      unsubscribe()
+    }
+    req.on('close', cleanup)
+    res.on('close', cleanup)
+    res.on('error', cleanup)
+    return true
+  }
+
   // 4. GET /api/bot/accuracy -> Parallel accuracy audit across 1 or all 8 presets
   if (req.method === 'GET' && url.pathname === '/api/bot/accuracy') {
+    if (
+      !enforcePermission(
+        principal,
+        'run:research',
+        res,
+        responseHeaders,
+        url.pathname,
+      )
+    ) {
+      return true
+    }
     const evaluateAll = url.searchParams.get('all') === 'true'
-    const targetPresets = evaluateAll ? STRATEGY_PRESETS : [activePreset]
+    const targetPresets = evaluateAll ? STRATEGY_PRESETS : [rt.activePreset]
 
-    const reports = await Promise.all(
-      targetPresets.map(async (preset) => {
-        const { candles, source, latencyMs } = await fetchOptimizedCandles(
-          preset.strategy.pair,
-          preset.timeframe,
-          CANDLE_LOOKBACK_LIMIT,
-        )
-        return {
-          ...evaluateBotPresetAccuracy(candles, preset),
+    try {
+      const reports = await Promise.all(
+        targetPresets.map(async (preset) => {
+          const { candles, source, latencyMs } = await fetchOptimizedCandles(
+            preset.strategy.pair,
+            preset.timeframe,
+            CANDLE_LOOKBACK_LIMIT,
+          )
+          return {
+            ...evaluateBotPresetAccuracy(candles, preset),
+            dataSource: source,
+            fetchLatencyMs: latencyMs,
+          }
+        }),
+      )
+
+      sendJson(
+        res,
+        200,
+        {
+          evaluatedAt: new Date().toISOString(),
+          candleSampleSize: CANDLE_LOOKBACK_LIMIT,
+          telemetry: getTelemetry(tenantId),
+          reports,
+        },
+        responseHeaders,
+      )
+    } catch (err) {
+      const status = err instanceof UpstreamMarketDataError ? 503 : 502
+      sendJson(
+        res,
+        status,
+        { error: err instanceof Error ? err.message : String(err) },
+        responseHeaders,
+      )
+    }
+    return true
+  }
+
+  // 5. GET /api/predictions/accuracy?timeframe=15m
+  if (req.method === 'GET' && url.pathname === '/api/predictions/accuracy') {
+    if (
+      !enforcePermission(
+        principal,
+        'run:research',
+        res,
+        responseHeaders,
+        url.pathname,
+      )
+    ) {
+      return true
+    }
+    const tf = (url.searchParams.get('timeframe') ?? '15m') as Interval
+    try {
+      const { candles, source, latencyMs } = await fetchOptimizedCandles(
+        'BTC/USDT',
+        tf,
+        CANDLE_LOOKBACK_LIMIT,
+      )
+      const rules = evaluateTimeframePredictions(tf, candles)
+
+      sendJson(
+        res,
+        200,
+        {
+          evaluatedAt: new Date().toISOString(),
+          timeframe: tf,
           dataSource: source,
           fetchLatencyMs: latencyMs,
-        }
-      }),
-    )
-
-    sendJson(res, 200, {
-      evaluatedAt: new Date().toISOString(),
-      candleSampleSize: CANDLE_LOOKBACK_LIMIT,
-      telemetry: getTelemetry(),
-      reports,
-    })
+          candleSampleSize: candles.length,
+          rules,
+        },
+        responseHeaders,
+      )
+    } catch (err) {
+      const status = err instanceof UpstreamMarketDataError ? 503 : 502
+      sendJson(
+        res,
+        status,
+        { error: err instanceof Error ? err.message : String(err) },
+        responseHeaders,
+      )
+    }
     return true
   }
 
-  // 5. GET /api/predictions/accuracy?timeframe=15m -> Prediction rule accuracy audit
-  if (req.method === 'GET' && url.pathname === '/api/predictions/accuracy') {
-    const tf = (url.searchParams.get('timeframe') ?? '15m') as Interval
-    const { candles, source, latencyMs } = await fetchOptimizedCandles(
-      'BTC/USDT',
-      tf,
-      CANDLE_LOOKBACK_LIMIT,
-    )
-    const rules = evaluateTimeframePredictions(tf, candles)
-
-    sendJson(res, 200, {
-      evaluatedAt: new Date().toISOString(),
-      timeframe: tf,
-      dataSource: source,
-      fetchLatencyMs: latencyMs,
-      candleSampleSize: candles.length,
-      rules,
-    })
-    return true
-  }
-
-  // 5b. GET /api/predictions/polymarket?tf=15m&limit=48 -> Live BTC Up/Down market windows
+  // 5b. GET /api/predictions/polymarket?tf=15m&limit=48
   if (req.method === 'GET' && url.pathname === '/api/predictions/polymarket') {
+    if (
+      !enforcePermission(
+        principal,
+        'run:research',
+        res,
+        responseHeaders,
+        url.pathname,
+      )
+    ) {
+      return true
+    }
     const tfParam = url.searchParams.get('tf')
     const tf: PolymarketTimeframe = tfParam === '5m' ? '5m' : '15m'
     const limit = Number(url.searchParams.get('limit') ?? 48)
@@ -739,152 +1296,331 @@ export async function handleBotApiRequest(
         tf,
         Number.isFinite(limit) ? limit : 48,
       )
-      sendJson(res, 200, snapshot)
+      sendJson(res, 200, snapshot, responseHeaders)
     } catch (err) {
-      sendJson(res, 502, {
-        error: err instanceof Error ? err.message : String(err),
-      })
+      sendJson(
+        res,
+        502,
+        { error: err instanceof Error ? err.message : String(err) },
+        responseHeaders,
+      )
     }
     return true
   }
 
-  // 6. POST /api/bot/start -> Starts the bot (optionally switching preset or strategy)
+  // 6. POST /api/bot/start
   if (req.method === 'POST' && url.pathname === '/api/bot/start') {
-    if (getExchangeStatusSnapshot().killSwitchActive) {
-      sendJson(res, 423, {
-        error:
-          'Emergency Kill-Switch is active. Reset the exchange Kill-Switch before starting the bot.',
-        snapshot: getBotStatusSnapshot(),
-      })
+    if (
+      !enforcePermission(
+        principal,
+        'trade:execute',
+        res,
+        responseHeaders,
+        url.pathname,
+      )
+    ) {
+      return true
+    }
+    if (getExchangeStatusSnapshot(tenantId).killSwitchActive) {
+      sendJson(
+        res,
+        423,
+        {
+          error:
+            'Emergency Kill-Switch is active. Reset the exchange Kill-Switch before starting the bot.',
+          snapshot: getBotStatusSnapshot(tenantId),
+        },
+        responseHeaders,
+      )
       return true
     }
 
     const body = await readOptionalJsonBody<{
       presetId?: string
       strategy?: Strategy
-    }>(req, res)
+    }>(req, res, responseHeaders)
     if (!body.ok) return true
     const parsed = body.data
 
     if (parsed?.presetId) {
       const found = STRATEGY_PRESETS.find((p) => p.id === parsed.presetId)
-      if (found && found.id !== activePreset.id) {
-        activePreset = found
-        engineState = createInitialBotState(activePreset)
+      if (found && found.id !== rt.activePreset.id) {
+        rt.activePreset = found
+        rt.engineState = createInitialBotState(rt.activePreset)
       }
     }
 
     if (parsed?.strategy && isStrategy(parsed.strategy)) {
-      activePreset = {
-        ...activePreset,
+      rt.activePreset = {
+        ...rt.activePreset,
         strategy: parsed.strategy,
       }
-      engineState = {
-        ...engineState,
+      rt.engineState = {
+        ...rt.engineState,
         pair: parsed.strategy.pair,
       }
     }
 
-    isRunning = true
-    await tickBot({ forceExecution: true })
-    saveStateToDisk()
-    broadcastSseUpdate()
-    sendJson(res, 200, getBotStatusSnapshot())
+    rt.isRunning = true
+    await tickBot(tenantId, { forceExecution: true })
+    saveStateToDisk(tenantId)
+    recordAudit(principal, 'bot:start', url.pathname, 'allowed', {
+      presetId: rt.activePreset.id,
+    })
+    broadcastSseUpdate(tenantId)
+    sendJson(res, 200, getBotStatusSnapshot(tenantId), responseHeaders)
     return true
   }
 
-  // 7. POST /api/bot/stop -> Stops the autonomous loop
+  // 7. POST /api/bot/stop
   if (req.method === 'POST' && url.pathname === '/api/bot/stop') {
-    isRunning = false
-    saveStateToDisk()
-    broadcastSseUpdate()
-    sendJson(res, 200, getBotStatusSnapshot())
+    if (
+      !enforcePermission(
+        principal,
+        'trade:execute',
+        res,
+        responseHeaders,
+        url.pathname,
+      )
+    ) {
+      return true
+    }
+    rt.isRunning = false
+    saveStateToDisk(tenantId)
+    recordAudit(principal, 'bot:stop', url.pathname, 'allowed')
+    broadcastSseUpdate(tenantId)
+    sendJson(res, 200, getBotStatusSnapshot(tenantId), responseHeaders)
     return true
   }
 
-  // 8. POST /api/bot/reset -> Resets balance, positions, and tickets for active preset
+  // 8. POST /api/bot/reset
   if (req.method === 'POST' && url.pathname === '/api/bot/reset') {
-    isRunning = false
-    engineState = createInitialBotState(activePreset)
-    saveStateToDisk()
-    broadcastSseUpdate()
-    sendJson(res, 200, getBotStatusSnapshot())
+    if (
+      !enforcePermission(
+        principal,
+        'trade:execute',
+        res,
+        responseHeaders,
+        url.pathname,
+      )
+    ) {
+      return true
+    }
+    rt.isRunning = false
+    rt.engineState = createInitialBotState(rt.activePreset)
+    saveStateToDisk(tenantId)
+    recordAudit(principal, 'bot:reset', url.pathname, 'allowed', {
+      presetId: rt.activePreset.id,
+    })
+    broadcastSseUpdate(tenantId)
+    sendJson(res, 200, getBotStatusSnapshot(tenantId), responseHeaders)
     return true
   }
 
-  // 9. POST /api/bot/preset -> Switches active preset or syncs custom strategy parameters
+  // 9. POST /api/bot/preset
   if (req.method === 'POST' && url.pathname === '/api/bot/preset') {
+    if (
+      !enforcePermission(
+        principal,
+        'trade:execute',
+        res,
+        responseHeaders,
+        url.pathname,
+      )
+    ) {
+      return true
+    }
     const body = await readOptionalJsonBody<{
       presetId?: string
       strategy?: Strategy
       timeframe?: Interval
       reset?: boolean
-    }>(req, res)
+    }>(req, res, responseHeaders)
     if (!body.ok) return true
     const parsed = body.data
 
     if (parsed?.presetId) {
       const found = STRATEGY_PRESETS.find((p) => p.id === parsed.presetId)
-      if (found && (found.id !== activePreset.id || parsed.reset === true)) {
-        activePreset = found
-        engineState = createInitialBotState(activePreset)
+      if (found && (found.id !== rt.activePreset.id || parsed.reset === true)) {
+        rt.activePreset = found
+        rt.engineState = createInitialBotState(rt.activePreset)
       }
     }
 
     if (parsed?.strategy && isStrategy(parsed.strategy)) {
-      activePreset = {
-        ...activePreset,
+      rt.activePreset = {
+        ...rt.activePreset,
         strategy: parsed.strategy,
-        timeframe: parsed.timeframe ?? activePreset.timeframe,
+        timeframe: parsed.timeframe ?? rt.activePreset.timeframe,
       }
-      engineState = {
-        ...engineState,
+      rt.engineState = {
+        ...rt.engineState,
         pair: parsed.strategy.pair,
-        timeframe: activePreset.timeframe,
+        timeframe: rt.activePreset.timeframe,
       }
     }
 
-    saveStateToDisk()
-    broadcastSseUpdate()
-    sendJson(res, 200, getBotStatusSnapshot())
+    saveStateToDisk(tenantId)
+    recordAudit(principal, 'bot:preset', url.pathname, 'allowed', {
+      presetId: rt.activePreset.id,
+      pair: rt.activePreset.strategy.pair,
+    })
+    broadcastSseUpdate(tenantId)
+    sendJson(res, 200, getBotStatusSnapshot(tenantId), responseHeaders)
     return true
   }
 
-  // 10. POST /api/bot/tick -> Forces immediate evaluation on current candles
+  // 10. POST /api/bot/tick
   if (req.method === 'POST' && url.pathname === '/api/bot/tick') {
-    await tickBot({ forceExecution: true, forceCandleRefresh: true })
-    saveStateToDisk()
-    sendJson(res, 200, getBotStatusSnapshot())
+    if (
+      !enforcePermission(
+        principal,
+        'trade:execute',
+        res,
+        responseHeaders,
+        url.pathname,
+      )
+    ) {
+      return true
+    }
+    await tickBot(tenantId, { forceExecution: true, forceCandleRefresh: true })
+    saveStateToDisk(tenantId)
+    sendJson(res, 200, getBotStatusSnapshot(tenantId), responseHeaders)
     return true
   }
 
   // ============================================================================
-  // Exchange Adapter Endpoints (Demo Vault + Hard Risk Limits + Kill-Switch)
+  // Exchange Adapter, Ledger & Audit Endpoints
   // ============================================================================
 
-  // 11. GET /api/exchange/status -> Demo adapter status, balances, limits, and order history
+  // 11. GET /api/exchange/status
   if (req.method === 'GET' && url.pathname === '/api/exchange/status') {
-    sendJson(res, 200, getExchangeStatusSnapshot())
+    if (
+      !enforcePermission(
+        principal,
+        'read:state',
+        res,
+        responseHeaders,
+        url.pathname,
+      )
+    ) {
+      return true
+    }
+    sendJson(res, 200, getExchangeStatusSnapshot(tenantId), responseHeaders)
     return true
   }
 
-  // 12. POST /api/exchange/order -> Submits an order validated against HardRiskLimits
+  // 11b. GET /api/ledger -> Tenant-scoped double-entry accounting ledger (`P0-4` / `P1-4`)
+  if (req.method === 'GET' && url.pathname === '/api/ledger') {
+    if (
+      !enforcePermission(
+        principal,
+        'ledger:read',
+        res,
+        responseHeaders,
+        url.pathname,
+      )
+    ) {
+      return true
+    }
+    const ledger = getTenantLedgerSnapshot(tenantId)
+    const persistedOrders = await getStateStore().getOrders(tenantId, 100)
+    sendJson(
+      res,
+      200,
+      {
+        ...ledger,
+        persistedOrderCount: persistedOrders.length,
+        storeDriver: getStateStore().driver,
+      },
+      responseHeaders,
+    )
+    return true
+  }
+
+  // 11c. GET /api/audit -> Tenant-scoped immutable audit trail (`P0-3`)
+  if (req.method === 'GET' && url.pathname === '/api/audit') {
+    if (
+      !enforcePermission(
+        principal,
+        'audit:read',
+        res,
+        responseHeaders,
+        url.pathname,
+      )
+    ) {
+      return true
+    }
+    const limit = Number(url.searchParams.get('limit') ?? 100)
+    const events = await getStateStore().getAuditEvents(
+      tenantId,
+      Number.isFinite(limit) ? limit : 100,
+    )
+    sendJson(res, 200, { tenantId, events }, responseHeaders)
+    return true
+  }
+
+  // 11d. POST /api/admin/retention -> Prunes expired records beyond retention window (`P0-4`)
+  if (req.method === 'POST' && url.pathname === '/api/admin/retention') {
+    if (
+      !enforcePermission(
+        principal,
+        'admin:manage',
+        res,
+        responseHeaders,
+        url.pathname,
+      )
+    ) {
+      return true
+    }
+    const body = await readOptionalJsonBody<{ retentionDays?: number }>(
+      req,
+      res,
+      responseHeaders,
+    )
+    if (!body.ok) return true
+    const report = await getStateStore().pruneRetention(
+      body.data?.retentionDays ?? 90,
+    )
+    recordAudit(principal, 'admin:retention', url.pathname, 'allowed', {
+      retentionDays: report.retentionDays,
+      deletedOrders: report.deletedOrders,
+      deletedAuditEvents: report.deletedAuditEvents,
+      deletedCandles: report.deletedCandles,
+    })
+    sendJson(res, 200, report, responseHeaders)
+    return true
+  }
+
+  // 12. POST /api/exchange/order
   if (req.method === 'POST' && url.pathname === '/api/exchange/order') {
+    if (
+      !enforcePermission(
+        principal,
+        'trade:execute',
+        res,
+        responseHeaders,
+        url.pathname,
+      )
+    ) {
+      return true
+    }
     const body = await readOptionalJsonBody<{
       pair?: string
       side?: 'BUY' | 'SELL'
       notionalUsd?: number
       referencePrice?: number
       clientOrderId?: string
-    }>(req, res)
+    }>(req, res, responseHeaders)
     if (!body.ok) return true
     const parsed = body.data
 
-    const pair = parsed?.pair ?? activePreset.strategy.pair
+    const pair = parsed?.pair ?? rt.activePreset.strategy.pair
     const side = parsed?.side === 'SELL' ? 'SELL' : 'BUY'
     const notionalUsd = Number(parsed?.notionalUsd ?? 100)
 
     const result = await submitExchangeOrder({
+      tenantId,
       pair,
       side,
       notionalUsd,
@@ -902,95 +1638,160 @@ export async function handleBotApiRequest(
         : `[HARD LIMIT] ${result.error}`,
     }
 
-    engineState = {
-      ...engineState,
-      logs: [newLog, ...engineState.logs].slice(0, 80),
+    rt.engineState = {
+      ...rt.engineState,
+      logs: [newLog, ...rt.engineState.logs].slice(0, 80),
     }
-    saveStateToDisk()
-    broadcastSseUpdate()
+    saveStateToDisk(tenantId)
+    recordAudit(
+      principal,
+      'exchange:order',
+      url.pathname,
+      result.ok ? 'allowed' : 'denied',
+      {
+        orderId: result.order.id,
+        pair,
+        side,
+        notionalUsd,
+        status: result.order.status,
+      },
+    )
+    broadcastSseUpdate(tenantId)
 
-    sendJson(res, 200, {
-      ...result,
-      bot: getBotStatusSnapshot(),
-    })
+    sendJson(
+      res,
+      200,
+      {
+        ...result,
+        bot: getBotStatusSnapshot(tenantId),
+      },
+      responseHeaders,
+    )
     return true
   }
 
-  // 13. POST /api/exchange/limits -> Updates HardRiskLimits or auto-mirror setting
+  // 13. POST /api/exchange/limits
   if (req.method === 'POST' && url.pathname === '/api/exchange/limits') {
+    if (
+      !enforcePermission(
+        principal,
+        'risk:manage',
+        res,
+        responseHeaders,
+        url.pathname,
+      )
+    ) {
+      return true
+    }
     const body = await readOptionalJsonBody<
       Partial<HardRiskLimits> & { autoMirrorBotOrders?: boolean }
-    >(req, res)
+    >(req, res, responseHeaders)
     if (!body.ok) return true
     const parsed = body.data
 
     if (parsed) {
-      updateHardRiskLimits(parsed)
+      updateHardRiskLimits(parsed, tenantId)
       if (typeof parsed.autoMirrorBotOrders === 'boolean') {
-        setExchangeAutoMirror(parsed.autoMirrorBotOrders)
+        setExchangeAutoMirror(parsed.autoMirrorBotOrders, tenantId)
       }
-      saveStateToDisk()
+      saveStateToDisk(tenantId)
+      recordAudit(principal, 'risk:limits', url.pathname, 'allowed', {
+        maxOrderNotionalUsd: parsed.maxOrderNotionalUsd ?? null,
+        maxDailyLossUsd: parsed.maxDailyLossUsd ?? null,
+        maxDailyOrders: parsed.maxDailyOrders ?? null,
+      })
     }
 
-    broadcastSseUpdate()
-    sendJson(res, 200, getBotStatusSnapshot())
+    broadcastSseUpdate(tenantId)
+    sendJson(res, 200, getBotStatusSnapshot(tenantId), responseHeaders)
     return true
   }
 
-  // 14. POST /api/exchange/kill-switch -> Engages or resets the Emergency Kill-Switch
+  // 14. POST /api/exchange/kill-switch
   if (req.method === 'POST' && url.pathname === '/api/exchange/kill-switch') {
     const body = await readOptionalJsonBody<{
       action?: 'engage' | 'reset'
       reason?: string
-    }>(req, res)
+    }>(req, res, responseHeaders)
     if (!body.ok) return true
     const parsed = body.data
+    const isReset = parsed?.action === 'reset'
 
-    if (parsed?.action === 'reset') {
-      resetEmergencyKillSwitch()
+    if (
+      !enforcePermission(
+        principal,
+        isReset ? 'risk:manage' : 'risk:engage_killswitch',
+        res,
+        responseHeaders,
+        url.pathname,
+      )
+    ) {
+      return true
+    }
+
+    if (isReset) {
+      resetEmergencyKillSwitch(tenantId)
       const rearmLog: BotEngineLog = {
         id: Date.now(),
         timestamp: new Date().toISOString(),
         level: 'info',
-        message:
-          'Emergency Kill-Switch reset by operator. System ready.',
+        message: 'Emergency Kill-Switch reset by operator. System ready.',
       }
-      engineState = {
-        ...engineState,
-        logs: [rearmLog, ...engineState.logs].slice(0, 80),
+      rt.engineState = {
+        ...rt.engineState,
+        logs: [rearmLog, ...rt.engineState.logs].slice(0, 80),
       }
+      recordAudit(principal, 'risk:killswitch_reset', url.pathname, 'allowed')
     } else {
-      const reason =
-        parsed?.reason ?? 'Emergency stop triggered by operator'
-      await triggerEmergencyKillSwitch(reason, () => {
-        isRunning = false
-        const killLog: BotEngineLog = {
-          id: Date.now(),
-          timestamp: new Date().toISOString(),
-          level: 'risk',
-          message: `KILL-SWITCH TRIGGERED: ${reason}. Bot stopped, orders canceled, and positions closed.`,
-        }
-        engineState = {
-          ...engineState,
-          openPosition: null,
-          activeTickets: [],
-          logs: [killLog, ...engineState.logs].slice(0, 80),
-        }
+      const reason = parsed?.reason ?? 'Emergency stop triggered by operator'
+      await triggerEmergencyKillSwitch(
+        reason,
+        () => {
+          rt.isRunning = false
+          const killLog: BotEngineLog = {
+            id: Date.now(),
+            timestamp: new Date().toISOString(),
+            level: 'risk',
+            message: `KILL-SWITCH TRIGGERED: ${reason}. Bot stopped, orders canceled, and positions closed.`,
+          }
+          rt.engineState = {
+            ...rt.engineState,
+            openPosition: null,
+            activeTickets: [],
+            logs: [killLog, ...rt.engineState.logs].slice(0, 80),
+          }
+        },
+        tenantId,
+      )
+      recordAudit(principal, 'risk:killswitch_engage', url.pathname, 'allowed', {
+        reason,
       })
     }
 
-    saveStateToDisk()
-    broadcastSseUpdate()
-    sendJson(res, 200, getBotStatusSnapshot())
+    saveStateToDisk(tenantId)
+    broadcastSseUpdate(tenantId)
+    sendJson(res, 200, getBotStatusSnapshot(tenantId), responseHeaders)
     return true
   }
 
-  // 15. POST /api/exchange/reset -> Restores Demo Vault balances and order history
+  // 15. POST /api/exchange/reset
   if (req.method === 'POST' && url.pathname === '/api/exchange/reset') {
-    resetExchangeDemoVault()
-    saveStateToDisk()
-    broadcastSseUpdate()
-    sendJson(res, 200, getBotStatusSnapshot())
+    if (
+      !enforcePermission(
+        principal,
+        'trade:execute',
+        res,
+        responseHeaders,
+        url.pathname,
+      )
+    ) {
+      return true
+    }
+    resetExchangeDemoVault(tenantId)
+    saveStateToDisk(tenantId)
+    recordAudit(principal, 'exchange:reset', url.pathname, 'allowed')
+    broadcastSseUpdate(tenantId)
+    sendJson(res, 200, getBotStatusSnapshot(tenantId), responseHeaders)
     return true
   }
 
@@ -998,18 +1799,29 @@ export async function handleBotApiRequest(
   // MetaTrader 5 Bridge Endpoints (MQL5 Expert Advisor)
   // ============================================================================
 
-  // 16. GET /api/mt5/signal -> Polled by FlareBridgeEA.mq5 via WebRequest()
+  // 16. GET /api/mt5/signal
   if (req.method === 'GET' && url.pathname === '/api/mt5/signal') {
+    if (
+      !enforcePermission(
+        principal,
+        'read:state',
+        res,
+        responseHeaders,
+        url.pathname,
+      )
+    ) {
+      return true
+    }
     const terminal = url.searchParams.get('terminal') ?? 'MT5-ExpertAdvisor'
     const symbol = url.searchParams.get('symbol')
     const packet = registerMt5Poll(
-      engineState,
-      activePreset,
-      getExchangeStatusSnapshot(),
+      rt.engineState,
+      rt.activePreset,
+      getExchangeStatusSnapshot(tenantId),
       { terminal, symbol },
     )
     const globals = getRuntimeGlobals()
-    const terminalKey = `${terminal}|${symbol ?? ''}|${packet.action}`
+    const terminalKey = `${tenantId}|${terminal}|${symbol ?? ''}|${packet.action}`
     const now = Date.now()
     const changed = terminalKey !== globals.lastMt5TerminalKey
     const intervalElapsed =
@@ -1018,21 +1830,32 @@ export async function handleBotApiRequest(
     if (changed || intervalElapsed) {
       globals.lastMt5TerminalKey = terminalKey
       globals.lastMt5SseBroadcastAt = now
-      broadcastSseUpdate()
+      broadcastSseUpdate(tenantId)
     }
-    sendJson(res, 200, packet)
+    sendJson(res, 200, packet, responseHeaders)
     return true
   }
 
-  // 17. POST /api/mt5/simulate-ping -> Simulates a poll from MetaTrader 5 in the UI
+  // 17. POST /api/mt5/simulate-ping
   if (req.method === 'POST' && url.pathname === '/api/mt5/simulate-ping') {
+    if (
+      !enforcePermission(
+        principal,
+        'trade:execute',
+        res,
+        responseHeaders,
+        url.pathname,
+      )
+    ) {
+      return true
+    }
     const packet = registerMt5Poll(
-      engineState,
-      activePreset,
-      getExchangeStatusSnapshot(),
+      rt.engineState,
+      rt.activePreset,
+      getExchangeStatusSnapshot(tenantId),
       {
         terminal: 'MT5-Terminal-Demo',
-        symbol: activePreset.strategy.pair.replace('/USDT', 'USD'),
+        symbol: rt.activePreset.strategy.pair.replace('/USDT', 'USD'),
       },
     )
     const mt5Log: BotEngineLog = {
@@ -1041,19 +1864,24 @@ export async function handleBotApiRequest(
       level: 'signal',
       message: `[MT5 BRIDGE] Poll received from ${packet.symbol} (Magic #${packet.magicNumber}) -> Action: ${packet.action} (${packet.signalId})`,
     }
-    engineState = {
-      ...engineState,
-      logs: [mt5Log, ...engineState.logs].slice(0, 80),
+    rt.engineState = {
+      ...rt.engineState,
+      logs: [mt5Log, ...rt.engineState.logs].slice(0, 80),
     }
-    saveStateToDisk()
-    broadcastSseUpdate()
-    sendJson(res, 200, {
-      packet,
-      bot: getBotStatusSnapshot(),
-    })
+    saveStateToDisk(tenantId)
+    broadcastSseUpdate(tenantId)
+    sendJson(
+      res,
+      200,
+      {
+        packet,
+        bot: getBotStatusSnapshot(tenantId),
+      },
+      responseHeaders,
+    )
     return true
   }
 
-  sendJson(res, 404, { error: 'API route not found' })
+  sendJson(res, 404, { error: 'API route not found' }, responseHeaders)
   return true
 }

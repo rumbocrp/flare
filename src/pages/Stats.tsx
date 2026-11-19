@@ -31,11 +31,11 @@ import {
   computeStrategyDiagnostics,
   startingBalance,
 } from '@/metrics'
-import { tradePnl, trades as sampleTrades } from '@/trades'
+import { tradePnl } from '@/trades'
 import type { PageId, Strategy, Tone, Trade } from '@/types'
 
 type TradeFilter = 'all' | 'wins' | 'losses'
-type TradeSource = 'backtest' | 'bot' | 'sample'
+type TradeSource = 'backtest' | 'bot'
 type DiagTab = 'edge' | 'pairs' | 'exits'
 
 type StatsProps = {
@@ -73,7 +73,7 @@ function Stats({ backtest, strategy, onNavigate }: StatsProps) {
   const [pairFilter, setPairFilter] = useState<string | null>(null)
   const [diagTab, setDiagTab] = useState<DiagTab>('edge')
   const [source, setSource] = useState<TradeSource>(
-    backtest ? 'backtest' : 'sample',
+    backtest ? 'backtest' : 'bot',
   )
   const [botSnapshot, setBotSnapshot] = useState<BotServerSnapshot | null>(null)
 
@@ -89,21 +89,16 @@ function Stats({ backtest, strategy, onNavigate }: StatsProps) {
 
   const botTrades = botSnapshot?.state.closedTrades ?? []
 
-  let activeTrades: Trade[] = sampleTrades
-  let initialBalance = startingBalance
-
-  if (source === 'backtest') {
-    activeTrades = backtest ? backtest.trades : []
-    initialBalance = backtest
-      ? backtest.summary.initialBalance
-      : startingBalance
-  } else if (source === 'bot') {
-    activeTrades = botTrades
-    initialBalance =
-      botSnapshot?.state.initialBalance ??
-      botSnapshot?.preset.execution.initialBalance ??
-      startingBalance
-  }
+  const activeTrades: Trade[] =
+    source === 'backtest' ? (backtest ? backtest.trades : []) : botTrades
+  const initialBalance =
+    source === 'backtest'
+      ? backtest
+        ? backtest.summary.initialBalance
+        : startingBalance
+      : (botSnapshot?.state.initialBalance ??
+        botSnapshot?.preset.execution.initialBalance ??
+        startingBalance)
 
   const metrics = computeMetrics(activeTrades, initialBalance)
   const diag = computeStrategyDiagnostics(activeTrades, initialBalance)
@@ -234,9 +229,6 @@ function Stats({ backtest, strategy, onNavigate }: StatsProps) {
                     </Badge>
                   )}
                 </TabsTrigger>
-                <TabsTrigger value="sample">
-                  {t('stats.sourceSample')}
-                </TabsTrigger>
               </TabsList>
             </Tabs>
 
@@ -278,9 +270,15 @@ function Stats({ backtest, strategy, onNavigate }: StatsProps) {
               type="button"
               variant="outline"
               size="sm"
-              onClick={() => handleChangeSource('sample')}
+              onClick={() =>
+                onNavigate(source === 'backtest' ? 'bot-run' : 'backtest')
+              }
             >
-              {t('stats.viewSample')}
+              <span>
+                {source === 'backtest'
+                  ? t('stats.openBot')
+                  : t('stats.openBacktest')}
+              </span>
             </Button>
           </div>
         </Card>

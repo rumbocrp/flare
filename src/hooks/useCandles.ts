@@ -1,4 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
+import {
+  fetchMarketCandlesFromGateway,
+  subscribeToMarketGatewayStream,
+} from '../api/botClient'
 import { binanceSource } from '../market/binance'
 import {
   mergeLiveCandle,
@@ -31,6 +35,27 @@ type LiveCandlesResult = {
   lastTickAt: number | null
 }
 
+async function fetchCandlesPreferringGateway(
+  source: MarketDataSource,
+  pair: string,
+  interval: Interval,
+  limit: number,
+  signal: AbortSignal,
+): Promise<Candle[]> {
+  if (source === binanceSource) {
+    const gateway = await fetchMarketCandlesFromGateway(
+      pair,
+      interval,
+      limit,
+      signal,
+    )
+    if (gateway && gateway.candles.length > 0) {
+      return gateway.candles
+    }
+  }
+  return source.getCandles({ pair, interval, limit, signal })
+}
+
 export function useCandles(
   source: MarketDataSource,
   pair: string,
@@ -44,8 +69,13 @@ export function useCandles(
   useEffect(() => {
     const controller = new AbortController()
 
-    source
-      .getCandles({ pair, interval, limit, signal: controller.signal })
+    fetchCandlesPreferringGateway(
+      source,
+      pair,
+      interval,
+      limit,
+      controller.signal,
+    )
       .then((data) => {
         if (controller.signal.aborted) return
         setStored({ key, state: { status: 'success', data } })
@@ -68,8 +98,10 @@ const WS_RECONCILE_MS = 30_000
 const REST_POLL_MS = 4_000
 
 /**
- * Loads the initial historical series and keeps it synced in real time
- * via Binance WebSocket with REST polling reconciliation as fallback.
+ * Loads the initial historical series and keeps it synced in real time.
+ * Prefers FLARE's shared server-side market-data gateway (`/api/market/stream`)
+ * so multiple tabs reuse one upstream Binance socket, degrading cleanly to
+ * direct Binance WebSocket + REST reconciliation if the backend is unavailable.
  */
 export function useLiveCandles(
   source: MarketDataSource,
@@ -84,7 +116,7 @@ export function useLiveCandles(
 
   useEffect(() => {
     const controller = new AbortController()
-    let unsubscribeWs: (() => void) | null = null
+    let unsubscribeStream: (() => void) | null = null
     let pollTimer: ReturnType<typeof setInterval> | null = null
     let active = true
     let inFlightPoll = false
@@ -92,10 +124,10 @@ export function useLiveCandles(
 
     streamStatusRef.current = source === binanceSource ? 'connecting' : 'off'
 
-    const startLiveSync = () => {
+    const startDirectFallbackSync = () => {
       if (!active || source !== binanceSource) return
 
-      unsubscribeWs = subscribeBinanceKlineStream(
+      unsubscribeStream = subscribeBinanceKlineStream(
         pair,
         interval,
         (candle) => {
@@ -181,8 +213,77 @@ export function useLiveCandles(
       }, REST_POLL_MS)
     }
 
-    source
-      .getCandles({ pair, interval, limit, signal: controller.signal })
+    const startSharedGatewaySync = () => {
+      if (!active || source !== binanceSource) return
+
+      unsubscribeStream = subscribeToMarketGatewayStream(
+        pair,
+        interval,
+        limit,
+        (event) => {
+          if (!active) return
+          const now = Date.now()
+          if (event.type === 'snapshot' && event.candles.length > 0) {
+            streamStatusRef.current = 'ws'
+            setStored({
+              key,
+              state: { status: 'success', data: event.candles.slice(-limit) },
+              streamStatus: 'ws',
+              lastTickAt: now,
+            })
+            return
+          }
+          if (event.type === 'candle') {
+            streamStatusRef.current = 'ws'
+            setStored((prev) => {
+              if (!prev || prev.key !== key || prev.state.status !== 'success') {
+                return prev
+              }
+              const nextCandles = mergeLiveCandle(
+                prev.state.data,
+                event.candle,
+                limit,
+              )
+              return {
+                key,
+                state: { status: 'success', data: nextCandles },
+                streamStatus: 'ws',
+                lastTickAt: now,
+              }
+            })
+            return
+          }
+          if (event.type === 'status') {
+            const mapped: LiveStreamStatus =
+              event.status === 'live'
+                ? 'ws'
+                : event.status === 'connecting' ||
+                    event.status === 'reconnecting'
+                  ? 'connecting'
+                  : 'poll'
+            streamStatusRef.current = mapped
+            setStored((prev) =>
+              prev && prev.key === key
+                ? { ...prev, streamStatus: mapped }
+                : prev,
+            )
+          }
+        },
+        () => {
+          if (!active) return
+          unsubscribeStream = null
+          startDirectFallbackSync()
+        },
+      )
+    }
+
+    fetchCandlesPreferringGateway(
+      source,
+      pair,
+      interval,
+      limit,
+      controller.signal,
+    )
       .then((data) => {
         if (!active || controller.signal.aborted) return
         setStored({
@@ -191,7 +292,7 @@ export function useLiveCandles(
           streamStatus: source === binanceSource ? 'connecting' : 'off',
           lastTickAt: Date.now(),
         })
-        startLiveSync()
+        startSharedGatewaySync()
       })
       .catch((error: unknown) => {
         if (!active || controller.signal.aborted) return
@@ -208,7 +309,7 @@ export function useLiveCandles(
     return () => {
       active = false
       controller.abort()
-      unsubscribeWs?.()
+      unsubscribeStream?.()
       if (pollTimer !== null) clearInterval(pollTimer)
     }
   }, [source, pair, interval, limit, key])

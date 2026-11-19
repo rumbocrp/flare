@@ -1,6 +1,16 @@
 import crypto from 'node:crypto'
 import { availablePairs } from '../strategy'
 import { fetchOptimizedCandles } from './candleCache'
+import {
+  buildInitialFundingEntry,
+  buildSpotFillEntry,
+  deriveAccountBalances,
+  deriveWalletBalances,
+  verifyLedgerInvariant,
+  type LedgerEntry,
+  type LedgerVerificationReport,
+} from './ledger/doubleEntryLedger'
+import { getStateStore } from './store'
 
 export type ExchangeAdapterMode = 'binance-testnet' | 'demo-vault'
 
@@ -71,7 +81,16 @@ export type ExchangeStatusSnapshot = {
   orders: ExchangeOrderRecord[]
 }
 
+export type TenantLedgerSnapshot = {
+  tenantId: string
+  verification: LedgerVerificationReport
+  walletBalances: Record<string, number>
+  accountBalances: Record<string, { asset: string; balance: number }>
+  entries: LedgerEntry[]
+}
+
 const TESTNET_BASE_URL = 'https://testnet.binance.vision'
+const DEFAULT_TENANT_ID = 'default'
 
 const DEFAULT_HARD_LIMITS: HardRiskLimits = {
   maxOrderNotionalUsd: 500,
@@ -89,27 +108,70 @@ const INITIAL_DEMO_BALANCES: Record<string, { free: number; locked: number }> = 
   DOGE: { free: 2500.0, locked: 0 },
 }
 
-let hardLimits: HardRiskLimits = { ...DEFAULT_HARD_LIMITS }
-let autoMirrorBotOrders = true
-let killSwitchActive = false
-let killSwitchActivatedAt: string | null = null
-let killSwitchReason: string | null = null
+const TESTNET_TIMEOUT_MS = 6_000
+const MAX_ORDER_HISTORY = 120
+const MAX_IN_MEMORY_LEDGER = 500
 
-let currentUtcDayKey = Math.floor(Date.now() / 86_400_000)
-let dailyOrderCount = 0
-let dailyRealizedLossUsd = 0
+type TenantExchangeState = {
+  tenantId: string
+  hardLimits: HardRiskLimits
+  autoMirrorBotOrders: boolean
+  killSwitchActive: boolean
+  killSwitchActivatedAt: string | null
+  killSwitchReason: string | null
+  currentUtcDayKey: number
+  dailyOrderCount: number
+  dailyRealizedLossUsd: number
+  demoBalances: Record<string, { free: number; locked: number }>
+  orderHistory: ExchangeOrderRecord[]
+  orderCounter: number
+  ledgerEntries: LedgerEntry[]
+}
 
-let demoBalances: Record<string, { free: number; locked: number }> =
-  structuredClone(INITIAL_DEMO_BALANCES)
-let orderHistory: ExchangeOrderRecord[] = []
-let orderCounter = 1000
+const tenantContexts = new Map<string, TenantExchangeState>()
 
-function syncDailyCounters(): void {
+function createFreshTenantState(tenantId: string): TenantExchangeState {
+  const initialBalances = structuredClone(INITIAL_DEMO_BALANCES)
+  const bootstrapEntry = buildInitialFundingEntry(
+    tenantId,
+    initialBalances,
+    `bootstrap-${tenantId}`,
+  )
+  return {
+    tenantId,
+    hardLimits: {
+      ...DEFAULT_HARD_LIMITS,
+      allowedPairs: [...availablePairs],
+    },
+    autoMirrorBotOrders: true,
+    killSwitchActive: false,
+    killSwitchActivatedAt: null,
+    killSwitchReason: null,
+    currentUtcDayKey: Math.floor(Date.now() / 86_400_000),
+    dailyOrderCount: 0,
+    dailyRealizedLossUsd: 0,
+    demoBalances: initialBalances,
+    orderHistory: [],
+    orderCounter: 1000,
+    ledgerEntries: [bootstrapEntry],
+  }
+}
+
+function getTenantCtx(tenantId = DEFAULT_TENANT_ID): TenantExchangeState {
+  let ctx = tenantContexts.get(tenantId)
+  if (!ctx) {
+    ctx = createFreshTenantState(tenantId)
+    tenantContexts.set(tenantId, ctx)
+  }
+  return ctx
+}
+
+function syncDailyCounters(ctx: TenantExchangeState): void {
   const todayKey = Math.floor(Date.now() / 86_400_000)
-  if (todayKey !== currentUtcDayKey) {
-    currentUtcDayKey = todayKey
-    dailyOrderCount = 0
-    dailyRealizedLossUsd = 0
+  if (todayKey !== ctx.currentUtcDayKey) {
+    ctx.currentUtcDayKey = todayKey
+    ctx.dailyOrderCount = 0
+    ctx.dailyRealizedLossUsd = 0
   }
 }
 
@@ -129,114 +191,147 @@ function signQuery(queryString: string, apiSecret: string): string {
     .digest('hex')
 }
 
-function getBalancesList(): ExchangeBalance[] {
-  return Object.entries(demoBalances).map(([asset, bal]) => ({
+function getBalancesList(ctx: TenantExchangeState): ExchangeBalance[] {
+  return Object.entries(ctx.demoBalances).map(([asset, bal]) => ({
     asset,
     free: Number(bal.free.toFixed(asset === 'USDT' ? 2 : 6)),
     locked: Number(bal.locked.toFixed(asset === 'USDT' ? 2 : 6)),
   }))
 }
 
-export function getExchangeStatusSnapshot(): ExchangeStatusSnapshot {
-  syncDailyCounters()
+export function getExchangeStatusSnapshot(
+  tenantId = DEFAULT_TENANT_ID,
+): ExchangeStatusSnapshot {
+  const ctx = getTenantCtx(tenantId)
+  syncDailyCounters(ctx)
   const creds = getTestnetCredentials()
   return {
     mode: creds ? 'binance-testnet' : 'demo-vault',
     testnetConfigured: Boolean(creds),
-    autoMirrorBotOrders,
-    killSwitchActive,
-    killSwitchActivatedAt,
-    killSwitchReason,
-    hardLimits: { ...hardLimits },
-    dailyOrderCount,
-    dailyRealizedLossUsd: Number(dailyRealizedLossUsd.toFixed(2)),
-    balances: getBalancesList(),
-    orders: orderHistory.slice(0, 40),
+    autoMirrorBotOrders: ctx.autoMirrorBotOrders,
+    killSwitchActive: ctx.killSwitchActive,
+    killSwitchActivatedAt: ctx.killSwitchActivatedAt,
+    killSwitchReason: ctx.killSwitchReason,
+    hardLimits: {
+      ...ctx.hardLimits,
+      allowedPairs: [...ctx.hardLimits.allowedPairs],
+    },
+    dailyOrderCount: ctx.dailyOrderCount,
+    dailyRealizedLossUsd: Number(ctx.dailyRealizedLossUsd.toFixed(2)),
+    balances: getBalancesList(ctx),
+    orders: ctx.orderHistory.slice(0, 40),
   }
 }
 
-/**
- * Enforces Hard Risk Limits before submitting any order.
- * Returns `null` when compliant, or a human-readable rejection reason otherwise.
- */
-function validateHardRiskLimits(params: {
-  pair: string
-  side: 'BUY' | 'SELL'
-  notionalUsd: number
-}): string | null {
-  syncDailyCounters()
+export function getTenantLedgerSnapshot(
+  tenantId = DEFAULT_TENANT_ID,
+): TenantLedgerSnapshot {
+  const ctx = getTenantCtx(tenantId)
+  return {
+    tenantId,
+    verification: verifyLedgerInvariant(ctx.ledgerEntries),
+    walletBalances: deriveWalletBalances(ctx.ledgerEntries),
+    accountBalances: deriveAccountBalances(ctx.ledgerEntries),
+    entries: ctx.ledgerEntries.slice(-100),
+  }
+}
 
-  if (killSwitchActive) {
-    return `Emergency Kill-Switch ACTIVE (${killSwitchReason ?? 'Manual lock'}). Reset the Kill-Switch before trading.`
+export function appendTenantLedgerEntry(
+  tenantId: string,
+  entry: LedgerEntry,
+): void {
+  const ctx = getTenantCtx(tenantId)
+  ctx.ledgerEntries.push(entry)
+  if (ctx.ledgerEntries.length > MAX_IN_MEMORY_LEDGER) {
+    ctx.ledgerEntries = ctx.ledgerEntries.slice(-MAX_IN_MEMORY_LEDGER)
+  }
+  void getStateStore()
+    .appendLedgerEntry(entry)
+    .catch(() => {})
+}
+
+function validateHardRiskLimits(
+  ctx: TenantExchangeState,
+  params: {
+    pair: string
+    side: 'BUY' | 'SELL'
+    notionalUsd: number
+  },
+): string | null {
+  syncDailyCounters(ctx)
+
+  if (ctx.killSwitchActive) {
+    return `Emergency Kill-Switch ACTIVE (${ctx.killSwitchReason ?? 'Manual lock'}). Reset the Kill-Switch before trading.`
   }
 
-  if (!hardLimits.allowedPairs.includes(params.pair)) {
-    return `Pair not authorized by hard risk limits: ${params.pair}. Allowed: ${hardLimits.allowedPairs.join(', ')}`
+  if (!ctx.hardLimits.allowedPairs.includes(params.pair)) {
+    return `Pair not authorized by hard risk limits: ${params.pair}. Allowed: ${ctx.hardLimits.allowedPairs.join(', ')}`
   }
 
   if (!Number.isFinite(params.notionalUsd) || params.notionalUsd <= 0) {
     return 'Order notional amount must be greater than $0 USD.'
   }
 
-  if (params.notionalUsd > hardLimits.maxOrderNotionalUsd) {
-    return `Order rejected by hard risk limit: $${params.notionalUsd.toFixed(2)} USD exceeds the max allowed per order ($${hardLimits.maxOrderNotionalUsd.toFixed(2)} USD).`
+  if (params.notionalUsd > ctx.hardLimits.maxOrderNotionalUsd) {
+    return `Order rejected by hard risk limit: $${params.notionalUsd.toFixed(2)} USD exceeds the max allowed per order ($${ctx.hardLimits.maxOrderNotionalUsd.toFixed(2)} USD).`
   }
 
-  if (dailyOrderCount >= hardLimits.maxDailyOrders) {
-    return `Daily hard risk limit reached: ${dailyOrderCount}/${hardLimits.maxDailyOrders} orders executed today.`
+  if (ctx.dailyOrderCount >= ctx.hardLimits.maxDailyOrders) {
+    return `Daily order limit reached (${ctx.dailyOrderCount}/${ctx.hardLimits.maxDailyOrders} UTC orders).`
   }
 
-  if (dailyRealizedLossUsd >= hardLimits.maxDailyLossUsd) {
-    return `Daily loss hard risk limit reached ($${dailyRealizedLossUsd.toFixed(2)} / $${hardLimits.maxDailyLossUsd.toFixed(2)} USD).`
+  if (ctx.dailyRealizedLossUsd >= ctx.hardLimits.maxDailyLossUsd) {
+    return `Daily hard loss limit reached (-$${ctx.dailyRealizedLossUsd.toFixed(2)} >= -$${ctx.hardLimits.maxDailyLossUsd.toFixed(2)} USD).`
   }
 
   return null
 }
 
-const TESTNET_TIMEOUT_MS = 6_000
-const MAX_ORDER_HISTORY = 60
-
 async function resolveExecutionPrice(
   pair: string,
   referencePrice?: number,
-): Promise<{ price: number; isSynthetic: boolean }> {
-  if (referencePrice && Number.isFinite(referencePrice) && referencePrice > 0) {
-    return { price: referencePrice, isSynthetic: false }
+): Promise<number | null> {
+  if (
+    typeof referencePrice === 'number' &&
+    Number.isFinite(referencePrice) &&
+    referencePrice > 0
+  ) {
+    return referencePrice
   }
   try {
-    const { candles, source } = await fetchOptimizedCandles(pair, '15m', 5)
+    const { candles } = await fetchOptimizedCandles(pair, '5m', 5)
     const last = candles[candles.length - 1]
-    if (last && last.close > 0) {
-      return { price: last.close, isSynthetic: source === 'synthetic-fallback' }
+    if (last && Number.isFinite(last.close) && last.close > 0) {
+      return last.close
     }
   } catch {
-    // Deterministic fallback price strictly for Demo Vault when network is offline
+    // Upstream price unavailable — never substitute hardcoded simulated prices
   }
-  if (pair.startsWith('BTC')) return { price: 85_000, isSynthetic: true }
-  if (pair.startsWith('ETH')) return { price: 2_800, isSynthetic: true }
-  if (pair.startsWith('SOL')) return { price: 175, isSynthetic: true }
-  return { price: 100, isSynthetic: true }
+  return null
 }
 
-function recordRejectedOrder(params: {
-  pair: string
-  side: 'BUY' | 'SELL'
-  notionalUsd: number
-  price: number
-  quantity: number
-  mode: ExchangeAdapterMode
-  source: 'manual' | 'bot-auto'
-  reason: string
-  clientOrderId?: string
-}): {
+function recordRejectedOrder(
+  ctx: TenantExchangeState,
+  params: {
+    pair: string
+    side: 'BUY' | 'SELL'
+    notionalUsd: number
+    price: number
+    quantity: number
+    mode: ExchangeAdapterMode
+    source: 'manual' | 'bot-auto'
+    reason: string
+    clientOrderId?: string
+  },
+): {
   ok: false
   error: string
   order: ExchangeOrderRecord
   snapshot: ExchangeStatusSnapshot
 } {
-  orderCounter += 1
+  ctx.orderCounter += 1
   const rejectedOrder: ExchangeOrderRecord = {
-    id: `ORD-${orderCounter}`,
+    id: `ORD-${ctx.orderCounter}`,
     clientOrderId: params.clientOrderId,
     timestamp: new Date().toISOString(),
     pair: params.pair,
@@ -249,20 +344,27 @@ function recordRejectedOrder(params: {
     source: params.source,
     reason: params.reason,
   }
-  orderHistory = [rejectedOrder, ...orderHistory].slice(0, MAX_ORDER_HISTORY)
+  ctx.orderHistory = [rejectedOrder, ...ctx.orderHistory].slice(
+    0,
+    MAX_ORDER_HISTORY,
+  )
+  void getStateStore()
+    .appendOrder(ctx.tenantId, rejectedOrder)
+    .catch(() => {})
   return {
     ok: false,
     error: params.reason,
     order: rejectedOrder,
-    snapshot: getExchangeStatusSnapshot(),
+    snapshot: getExchangeStatusSnapshot(ctx.tenantId),
   }
 }
 
 /**
  * Submits an order to the Demo exchange adapter (Binance Spot Testnet or local Demo Vault)
- * after enforcing strict Hard Risk Limits and idempotency keys.
+ * after enforcing tenant-scoped Hard Risk Limits, idempotency keys, and double-entry ledger posting.
  */
 export async function submitExchangeOrder(params: {
+  tenantId?: string
   pair: string
   side: 'BUY' | 'SELL'
   notionalUsd: number
@@ -277,10 +379,12 @@ export async function submitExchangeOrder(params: {
   order: ExchangeOrderRecord
   snapshot: ExchangeStatusSnapshot
 }> {
-  syncDailyCounters()
+  const tenantId = params.tenantId ?? DEFAULT_TENANT_ID
+  const ctx = getTenantCtx(tenantId)
+  syncDailyCounters(ctx)
 
   if (params.clientOrderId) {
-    const existing = orderHistory.find(
+    const existing = ctx.orderHistory.find(
       (o) => o.clientOrderId === params.clientOrderId,
     )
     if (existing) {
@@ -288,7 +392,7 @@ export async function submitExchangeOrder(params: {
         ok: existing.status === 'FILLED',
         error: existing.status === 'FILLED' ? undefined : existing.reason,
         order: existing,
-        snapshot: getExchangeStatusSnapshot(),
+        snapshot: getExchangeStatusSnapshot(tenantId),
       }
     }
   }
@@ -296,23 +400,26 @@ export async function submitExchangeOrder(params: {
   const creds = getTestnetCredentials()
   const mode: ExchangeAdapterMode = creds ? 'binance-testnet' : 'demo-vault'
   const source = params.source ?? 'manual'
-  const resolved = await resolveExecutionPrice(params.pair, params.referencePrice)
-  let fillPrice = resolved.price
-  let quantity =
-    fillPrice > 0 ? Number((params.notionalUsd / fillPrice).toFixed(6)) : 0
+  const resolvedPrice = await resolveExecutionPrice(
+    params.pair,
+    params.referencePrice,
+  )
 
-  const rejectionReason = validateHardRiskLimits({
+  const rejectionReason = validateHardRiskLimits(ctx, {
     pair: params.pair,
     side: params.side,
     notionalUsd: params.notionalUsd,
   })
 
   if (rejectionReason) {
-    return recordRejectedOrder({
+    const price = resolvedPrice ?? 0
+    const quantity =
+      price > 0 ? Number((params.notionalUsd / price).toFixed(6)) : 0
+    return recordRejectedOrder(ctx, {
       pair: params.pair,
       side: params.side,
       notionalUsd: params.notionalUsd,
-      price: fillPrice,
+      price,
       quantity,
       mode,
       source,
@@ -321,28 +428,30 @@ export async function submitExchangeOrder(params: {
     })
   }
 
-  if (creds && resolved.isSynthetic && !params.referencePrice) {
-    return recordRejectedOrder({
+  if (resolvedPrice === null) {
+    return recordRejectedOrder(ctx, {
       pair: params.pair,
       side: params.side,
       notionalUsd: params.notionalUsd,
-      price: fillPrice,
-      quantity,
+      price: 0,
+      quantity: 0,
       mode,
       source,
-      reason: 'Rejected: synthetic fallback market data cannot execute on Binance Testnet.',
+      reason:
+        'Rejected: live upstream market price unavailable (refusing hardcoded or simulated fallback price).',
       clientOrderId: params.clientOrderId,
     })
   }
 
+  let fillPrice = resolvedPrice
+  let quantity = Number((params.notionalUsd / fillPrice).toFixed(6))
+
   const baseAsset = params.pair.split('/')[0] ?? 'BTC'
-  if (!demoBalances[baseAsset]) {
-    demoBalances[baseAsset] = { free: 0, locked: 0 }
+  if (!ctx.demoBalances[baseAsset]) {
+    ctx.demoBalances[baseAsset] = { free: 0, locked: 0 }
   }
 
-  let executionNote = resolved.isSynthetic
-    ? 'Executed in Local Demo Vault (Synthetic Offline Reference)'
-    : 'Executed in Local Demo Vault (Spot Simulation)'
+  let executionNote = 'Executed in Local Demo Vault (Live Market Price)'
   let venueOrderId: string | undefined
 
   if (creds) {
@@ -371,7 +480,7 @@ export async function submitExchangeOrder(params: {
       } | null
 
       if (!response.ok || !payload) {
-        return recordRejectedOrder({
+        return recordRejectedOrder(ctx, {
           pair: params.pair,
           side: params.side,
           notionalUsd: params.notionalUsd,
@@ -384,8 +493,12 @@ export async function submitExchangeOrder(params: {
         })
       }
 
-      if (payload.status && payload.status !== 'FILLED' && payload.status !== 'PARTIALLY_FILLED') {
-        return recordRejectedOrder({
+      if (
+        payload.status &&
+        payload.status !== 'FILLED' &&
+        payload.status !== 'PARTIALLY_FILLED'
+      ) {
+        return recordRejectedOrder(ctx, {
           pair: params.pair,
           side: params.side,
           notionalUsd: params.notionalUsd,
@@ -411,7 +524,7 @@ export async function submitExchangeOrder(params: {
       }
       executionNote = `Executed & reconciled on Binance Spot Testnet (#${venueOrderId ?? 'ack'})`
     } catch (err) {
-      return recordRejectedOrder({
+      return recordRejectedOrder(ctx, {
         pair: params.pair,
         side: params.side,
         notionalUsd: params.notionalUsd,
@@ -425,10 +538,10 @@ export async function submitExchangeOrder(params: {
     }
   }
 
-  // Update balances in the local Demo Vault
+  // Update balances in the tenant's local Demo Vault
   if (params.side === 'BUY') {
-    if (demoBalances.USDT.free < params.notionalUsd) {
-      return recordRejectedOrder({
+    if (ctx.demoBalances.USDT.free < params.notionalUsd) {
+      return recordRejectedOrder(ctx, {
         pair: params.pair,
         side: params.side,
         notionalUsd: params.notionalUsd,
@@ -436,26 +549,28 @@ export async function submitExchangeOrder(params: {
         quantity,
         mode,
         source,
-        reason: `Insufficient USDT balance in Demo Vault ($${demoBalances.USDT.free.toFixed(2)} < $${params.notionalUsd.toFixed(2)} USD).`,
+        reason: `Insufficient USDT balance in Demo Vault ($${ctx.demoBalances.USDT.free.toFixed(2)} < $${params.notionalUsd.toFixed(2)} USD).`,
         clientOrderId: params.clientOrderId,
       })
     }
-    demoBalances.USDT.free -= params.notionalUsd
-    demoBalances[baseAsset].free += quantity
+    ctx.demoBalances.USDT.free -= params.notionalUsd
+    ctx.demoBalances[baseAsset].free += quantity
   } else {
-    // On SELL, credit USDT and debit base asset (or simulate position close)
-    demoBalances[baseAsset].free = Math.max(0, demoBalances[baseAsset].free - quantity)
-    demoBalances.USDT.free += params.notionalUsd
+    ctx.demoBalances[baseAsset].free = Math.max(
+      0,
+      ctx.demoBalances[baseAsset].free - quantity,
+    )
+    ctx.demoBalances.USDT.free += params.notionalUsd
   }
 
-  dailyOrderCount += 1
+  ctx.dailyOrderCount += 1
   if (typeof params.realizedPnlUsd === 'number' && params.realizedPnlUsd < 0) {
-    dailyRealizedLossUsd += Math.abs(params.realizedPnlUsd)
+    ctx.dailyRealizedLossUsd += Math.abs(params.realizedPnlUsd)
   }
 
-  orderCounter += 1
+  ctx.orderCounter += 1
   const filledOrder: ExchangeOrderRecord = {
-    id: `ORD-${orderCounter}`,
+    id: `ORD-${ctx.orderCounter}`,
     clientOrderId: params.clientOrderId,
     venueOrderId,
     timestamp: new Date().toISOString(),
@@ -469,28 +584,44 @@ export async function submitExchangeOrder(params: {
     source,
     reason: executionNote,
   }
-  orderHistory = [filledOrder, ...orderHistory].slice(0, MAX_ORDER_HISTORY)
+  ctx.orderHistory = [filledOrder, ...ctx.orderHistory].slice(
+    0,
+    MAX_ORDER_HISTORY,
+  )
+
+  const ledgerEntry = buildSpotFillEntry({
+    tenantId,
+    orderId: filledOrder.id,
+    venueOrderId,
+    pair: filledOrder.pair,
+    side: filledOrder.side,
+    quantity: filledOrder.quantity,
+    price: filledOrder.price,
+    notionalUsd: filledOrder.notionalUsd,
+    mode: filledOrder.mode,
+  })
+  appendTenantLedgerEntry(tenantId, ledgerEntry)
+
+  void getStateStore()
+    .appendOrder(tenantId, filledOrder)
+    .catch(() => {})
 
   return {
     ok: true,
     order: filledOrder,
-    snapshot: getExchangeStatusSnapshot(),
+    snapshot: getExchangeStatusSnapshot(tenantId),
   }
 }
 
-/**
- * Triggers the emergency Kill-Switch:
- * 1. Immediately blocks any future orders.
- * 2. Cancels open orders on Binance Testnet when configured.
- * 3. Invokes `onHaltBot` to stop the autonomous engine and close open positions.
- */
 export async function triggerEmergencyKillSwitch(
   reason = 'Emergency stop triggered by operator',
   onHaltBot?: () => void,
+  tenantId = DEFAULT_TENANT_ID,
 ): Promise<ExchangeStatusSnapshot> {
-  killSwitchActive = true
-  killSwitchActivatedAt = new Date().toISOString()
-  killSwitchReason = reason
+  const ctx = getTenantCtx(tenantId)
+  ctx.killSwitchActive = true
+  ctx.killSwitchActivatedAt = new Date().toISOString()
+  ctx.killSwitchReason = reason
 
   if (onHaltBot) {
     onHaltBot()
@@ -498,7 +629,7 @@ export async function triggerEmergencyKillSwitch(
 
   const creds = getTestnetCredentials()
   if (creds) {
-    for (const pair of hardLimits.allowedPairs) {
+    for (const pair of ctx.hardLimits.allowedPairs) {
       try {
         const symbol = pair.replace('/', '')
         const query = `symbol=${symbol}&timestamp=${Date.now()}`
@@ -516,10 +647,10 @@ export async function triggerEmergencyKillSwitch(
     }
   }
 
-  orderCounter += 1
+  ctx.orderCounter += 1
   const killRecord: ExchangeOrderRecord = {
-    id: `KILL-${orderCounter}`,
-    timestamp: killSwitchActivatedAt,
+    id: `KILL-${ctx.orderCounter}`,
+    timestamp: ctx.killSwitchActivatedAt,
     pair: 'ALL/USDT',
     side: 'SELL',
     notionalUsd: 0,
@@ -530,119 +661,128 @@ export async function triggerEmergencyKillSwitch(
     source: 'manual',
     reason: `KILL-SWITCH: ${reason}`,
   }
-  orderHistory = [killRecord, ...orderHistory].slice(0, 60)
+  ctx.orderHistory = [killRecord, ...ctx.orderHistory].slice(0, 60)
+  void getStateStore()
+    .appendOrder(tenantId, killRecord)
+    .catch(() => {})
 
-  return getExchangeStatusSnapshot()
+  return getExchangeStatusSnapshot(tenantId)
 }
 
-export function resetEmergencyKillSwitch(): ExchangeStatusSnapshot {
-  killSwitchActive = false
-  killSwitchActivatedAt = null
-  killSwitchReason = null
-  return getExchangeStatusSnapshot()
+export function resetEmergencyKillSwitch(
+  tenantId = DEFAULT_TENANT_ID,
+): ExchangeStatusSnapshot {
+  const ctx = getTenantCtx(tenantId)
+  ctx.killSwitchActive = false
+  ctx.killSwitchActivatedAt = null
+  ctx.killSwitchReason = null
+  return getExchangeStatusSnapshot(tenantId)
 }
 
 export function updateHardRiskLimits(
   partial: Partial<HardRiskLimits>,
+  tenantId = DEFAULT_TENANT_ID,
 ): ExchangeStatusSnapshot {
+  const ctx = getTenantCtx(tenantId)
   if (
     typeof partial.maxOrderNotionalUsd === 'number' &&
     partial.maxOrderNotionalUsd >= 10
   ) {
-    hardLimits.maxOrderNotionalUsd = partial.maxOrderNotionalUsd
+    ctx.hardLimits.maxOrderNotionalUsd = partial.maxOrderNotionalUsd
   }
   if (
     typeof partial.maxDailyLossUsd === 'number' &&
     partial.maxDailyLossUsd >= 10
   ) {
-    hardLimits.maxDailyLossUsd = partial.maxDailyLossUsd
+    ctx.hardLimits.maxDailyLossUsd = partial.maxDailyLossUsd
   }
   if (
     typeof partial.maxDailyOrders === 'number' &&
     partial.maxDailyOrders >= 1
   ) {
-    hardLimits.maxDailyOrders = Math.round(partial.maxDailyOrders)
+    ctx.hardLimits.maxDailyOrders = Math.round(partial.maxDailyOrders)
   }
   if (Array.isArray(partial.allowedPairs) && partial.allowedPairs.length > 0) {
     const valid = partial.allowedPairs.filter((p) => availablePairs.includes(p))
     if (valid.length > 0) {
-      hardLimits.allowedPairs = valid
+      ctx.hardLimits.allowedPairs = valid
     }
   }
-  return getExchangeStatusSnapshot()
+  return getExchangeStatusSnapshot(tenantId)
 }
 
-export function setExchangeAutoMirror(enabled: boolean): ExchangeStatusSnapshot {
-  autoMirrorBotOrders = Boolean(enabled)
-  return getExchangeStatusSnapshot()
+export function setExchangeAutoMirror(
+  enabled: boolean,
+  tenantId = DEFAULT_TENANT_ID,
+): ExchangeStatusSnapshot {
+  const ctx = getTenantCtx(tenantId)
+  ctx.autoMirrorBotOrders = Boolean(enabled)
+  return getExchangeStatusSnapshot(tenantId)
 }
 
-/**
- * Serializes kill-switch, daily risk counters, limits, balances, and monotonic
- * order counter so process restarts never wipe limits or reuse order IDs (`P0-2`).
- */
-export function exportExchangeState(): PersistedExchangeState {
-  syncDailyCounters()
+export function exportExchangeState(
+  tenantId = DEFAULT_TENANT_ID,
+): PersistedExchangeState {
+  const ctx = getTenantCtx(tenantId)
+  syncDailyCounters(ctx)
   return {
     schemaVersion: 1,
-    autoMirrorBotOrders,
-    killSwitchActive,
-    killSwitchActivatedAt,
-    killSwitchReason,
-    currentUtcDayKey,
-    dailyOrderCount,
-    dailyRealizedLossUsd: Number(dailyRealizedLossUsd.toFixed(2)),
+    autoMirrorBotOrders: ctx.autoMirrorBotOrders,
+    killSwitchActive: ctx.killSwitchActive,
+    killSwitchActivatedAt: ctx.killSwitchActivatedAt,
+    killSwitchReason: ctx.killSwitchReason,
+    currentUtcDayKey: ctx.currentUtcDayKey,
+    dailyOrderCount: ctx.dailyOrderCount,
+    dailyRealizedLossUsd: Number(ctx.dailyRealizedLossUsd.toFixed(2)),
     hardLimits: {
-      ...hardLimits,
-      allowedPairs: [...hardLimits.allowedPairs],
+      ...ctx.hardLimits,
+      allowedPairs: [...ctx.hardLimits.allowedPairs],
     },
-    balances: structuredClone(demoBalances),
-    orderHistory: orderHistory.slice(0, MAX_ORDER_HISTORY),
-    orderCounter,
+    balances: structuredClone(ctx.demoBalances),
+    orderHistory: ctx.orderHistory.slice(0, MAX_ORDER_HISTORY),
+    orderCounter: ctx.orderCounter,
   }
 }
 
-/**
- * Restores persisted exchange/risk state on startup while keeping monotonic IDs
- * strictly above any previously recorded orders and respecting UTC day rollovers.
- */
 export function restoreExchangeState(
   persisted?: Partial<PersistedExchangeState> | null,
+  tenantId = DEFAULT_TENANT_ID,
 ): ExchangeStatusSnapshot {
+  const ctx = getTenantCtx(tenantId)
   if (!persisted || typeof persisted !== 'object') {
-    return getExchangeStatusSnapshot()
+    return getExchangeStatusSnapshot(tenantId)
   }
 
   if (typeof persisted.autoMirrorBotOrders === 'boolean') {
-    autoMirrorBotOrders = persisted.autoMirrorBotOrders
+    ctx.autoMirrorBotOrders = persisted.autoMirrorBotOrders
   }
   if (typeof persisted.killSwitchActive === 'boolean') {
-    killSwitchActive = persisted.killSwitchActive
-    killSwitchActivatedAt = persisted.killSwitchActivatedAt ?? null
-    killSwitchReason = persisted.killSwitchReason ?? null
+    ctx.killSwitchActive = persisted.killSwitchActive
+    ctx.killSwitchActivatedAt = persisted.killSwitchActivatedAt ?? null
+    ctx.killSwitchReason = persisted.killSwitchReason ?? null
   }
 
   if (persisted.hardLimits) {
-    updateHardRiskLimits(persisted.hardLimits)
+    updateHardRiskLimits(persisted.hardLimits, tenantId)
   }
 
   const todayKey = Math.floor(Date.now() / 86_400_000)
   if (persisted.currentUtcDayKey === todayKey) {
-    currentUtcDayKey = todayKey
-    dailyOrderCount =
+    ctx.currentUtcDayKey = todayKey
+    ctx.dailyOrderCount =
       typeof persisted.dailyOrderCount === 'number' &&
       Number.isFinite(persisted.dailyOrderCount)
         ? Math.max(0, Math.round(persisted.dailyOrderCount))
         : 0
-    dailyRealizedLossUsd =
+    ctx.dailyRealizedLossUsd =
       typeof persisted.dailyRealizedLossUsd === 'number' &&
       Number.isFinite(persisted.dailyRealizedLossUsd)
         ? Math.max(0, persisted.dailyRealizedLossUsd)
         : 0
   } else {
-    currentUtcDayKey = todayKey
-    dailyOrderCount = 0
-    dailyRealizedLossUsd = 0
+    ctx.currentUtcDayKey = todayKey
+    ctx.dailyOrderCount = 0
+    ctx.dailyRealizedLossUsd = 0
   }
 
   if (persisted.balances && typeof persisted.balances === 'object') {
@@ -662,14 +802,14 @@ export function restoreExchangeState(
       }
     }
     if (nextBalances.USDT) {
-      demoBalances = nextBalances
+      ctx.demoBalances = nextBalances
     }
   }
 
   const restoredOrders = Array.isArray(persisted.orderHistory)
     ? persisted.orderHistory.slice(0, MAX_ORDER_HISTORY)
     : []
-  orderHistory = restoredOrders
+  ctx.orderHistory = restoredOrders
 
   let maxOrderNum = 1000
   for (const ord of restoredOrders) {
@@ -686,19 +826,43 @@ export function restoreExchangeState(
     Number.isFinite(persisted.orderCounter)
       ? persisted.orderCounter
       : 1000
-  orderCounter = Math.max(orderCounter, persistedCounter, maxOrderNum, 1000)
+  ctx.orderCounter = Math.max(
+    ctx.orderCounter,
+    persistedCounter,
+    maxOrderNum,
+    1000,
+  )
 
-  return getExchangeStatusSnapshot()
+  return getExchangeStatusSnapshot(tenantId)
 }
 
-export function resetExchangeDemoVault(): ExchangeStatusSnapshot {
-  killSwitchActive = false
-  killSwitchActivatedAt = null
-  killSwitchReason = null
-  dailyOrderCount = 0
-  dailyRealizedLossUsd = 0
-  hardLimits = { ...DEFAULT_HARD_LIMITS, allowedPairs: [...availablePairs] }
-  demoBalances = structuredClone(INITIAL_DEMO_BALANCES)
-  orderHistory = []
-  return getExchangeStatusSnapshot()
+export function resetExchangeDemoVault(
+  tenantId = DEFAULT_TENANT_ID,
+): ExchangeStatusSnapshot {
+  const ctx = getTenantCtx(tenantId)
+  ctx.killSwitchActive = false
+  ctx.killSwitchActivatedAt = null
+  ctx.killSwitchReason = null
+  ctx.dailyOrderCount = 0
+  ctx.dailyRealizedLossUsd = 0
+  ctx.hardLimits = {
+    ...DEFAULT_HARD_LIMITS,
+    allowedPairs: [...availablePairs],
+  }
+  ctx.demoBalances = structuredClone(INITIAL_DEMO_BALANCES)
+  ctx.orderHistory = []
+  const resetEntry = buildInitialFundingEntry(
+    tenantId,
+    ctx.demoBalances,
+    `reset-${Date.now()}`,
+  )
+  ctx.ledgerEntries = [resetEntry]
+  void getStateStore()
+    .appendLedgerEntry(resetEntry)
+    .catch(() => {})
+  return getExchangeStatusSnapshot(tenantId)
+}
+
+export function clearAllTenantExchangeStates(): void {
+  tenantContexts.clear()
 }

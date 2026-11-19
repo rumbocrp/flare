@@ -30,3 +30,6 @@ Backup/
 .agent/
 src/server/bot-state.json
 src/server/bot-state.json.*
+src/server/*.db
+src/server/*.db-wal
+src/server/*.db-shm

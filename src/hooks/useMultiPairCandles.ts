@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react'
+import { fetchMarketCandlesFromGateway } from '../api/botClient'
+import { binanceSource } from '../market/binance'
 import type {
   AsyncState,
   Candle,
@@ -12,8 +14,8 @@ type MultiPairState = {
 }
 
 /**
- * Fetches recent candles in parallel for multiple pairs without simulated fallbacks.
- * Each pair updates independently as soon as the market data source responds.
+ * Fetches recent candles in parallel for multiple pairs, preferring FLARE's
+ * shared backend market-data gateway before falling back to direct source calls.
  */
 export function useMultiPairCandles(
   source: MarketDataSource,
@@ -34,8 +36,25 @@ export function useMultiPairCandles(
     const targetPairs = pairsKey ? pairsKey.split(',') : []
 
     for (const pair of targetPairs) {
-      source
-        .getCandles({ pair, interval, limit, signal: controller.signal })
+      const loadPair = async (): Promise<Candle[]> => {
+        if (source === binanceSource) {
+          const gw = await fetchMarketCandlesFromGateway(
+            pair,
+            interval,
+            limit,
+            controller.signal,
+          )
+          if (gw && gw.candles.length > 0) return gw.candles
+        }
+        return source.getCandles({
+          pair,
+          interval,
+          limit,
+          signal: controller.signal,
+        })
+      }
+
+      loadPair()
         .then((data) => {
           if (controller.signal.aborted) return
           setStored((prev) => {
