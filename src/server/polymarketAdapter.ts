@@ -28,6 +28,12 @@ export type PolymarketWindow = {
   bestAsk: number | null
   resolvedUp: boolean | null
   volume: number
+  /** CLOB token IDs and execution metadata populated from Gamma API. */
+  conditionId?: string | null
+  upTokenId?: string | null
+  downTokenId?: string | null
+  tickSize?: number | null
+  negRisk?: boolean
 }
 
 export type PolymarketSnapshot = {
@@ -161,12 +167,16 @@ export function priceAtOpen(
 type GammaMarketFields = {
   question: string | null
   closed: boolean
+  conditionId: string | null
   upTokenId: string | null
+  downTokenId: string | null
   upIndex: number
   outcomePrices: number[]
   bestBid: number | null
   bestAsk: number | null
   volume: number
+  tickSize: number | null
+  negRisk: boolean
 }
 
 export function parseGammaMarket(raw: unknown): GammaMarketFields | null {
@@ -175,15 +185,21 @@ export function parseGammaMarket(raw: unknown): GammaMarketFields | null {
   const outcomes = parseJsonArray(m.outcomes).map((o) => String(o).toLowerCase())
   const tokens = parseJsonArray(m.clobTokenIds).map(String)
   const upIndex = Math.max(0, outcomes.indexOf('up'))
+  const explicitDown = outcomes.indexOf('down')
+  const downIndex = explicitDown >= 0 ? explicitDown : upIndex === 0 ? 1 : 0
   return {
     question: typeof m.question === 'string' ? m.question : null,
     closed: m.closed === true,
+    conditionId: typeof m.conditionId === 'string' ? m.conditionId : null,
     upTokenId: tokens[upIndex] ?? null,
+    downTokenId: tokens[downIndex] ?? null,
     upIndex,
     outcomePrices: parseJsonArray(m.outcomePrices).map((p) => toNumber(p) ?? NaN),
     bestBid: toNumber(m.bestBid),
     bestAsk: toNumber(m.bestAsk),
     volume: toNumber(m.volume) ?? 0,
+    tickSize: toNumber(m.orderPriceMinTickSize) ?? 0.01,
+    negRisk: m.negRisk === true,
   }
 }
 
@@ -266,6 +282,11 @@ async function loadWindow(
     bestAsk: market.closed ? null : market.bestAsk,
     resolvedUp,
     volume: market.volume,
+    conditionId: market.conditionId,
+    upTokenId: market.upTokenId,
+    downTokenId: market.downTokenId,
+    tickSize: market.tickSize,
+    negRisk: market.negRisk,
   }
 }
 

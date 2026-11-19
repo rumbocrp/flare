@@ -26,6 +26,11 @@ export type ExecutablePredictionQuote = {
   source: QuoteSource
   category?: MarketCategory
   takerFeeRate?: number
+  /** CLOB execution token ID & market parameters when sourced from Polymarket. */
+  tokenId?: string
+  conditionId?: string
+  tickSize?: number
+  negRisk?: boolean
 }
 
 export type QuoteRejectionCode =
@@ -141,6 +146,11 @@ export function buildQuoteFromPolymarketWindow(
   const mid = roundPrice((bid + ask) / 2)
   const spread = roundPrice(Math.max(0, ask - bid))
 
+  const tokenId =
+    outcome === 'YES'
+      ? (window.upTokenId ?? undefined)
+      : (window.downTokenId ?? undefined)
+
   return {
     instrumentId: window.slug,
     outcome,
@@ -152,6 +162,10 @@ export function buildQuoteFromPolymarketWindow(
     source,
     category: 'crypto',
     takerFeeRate: POLYMARKET_FEES.crypto.takerFeeRate,
+    tokenId,
+    conditionId: window.conditionId ?? undefined,
+    tickSize: window.tickSize ?? 0.01,
+    negRisk: window.negRisk ?? false,
   }
 }
 

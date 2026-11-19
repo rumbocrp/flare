@@ -61,6 +61,16 @@ import {
   type PolymarketTimeframe,
 } from './polymarketAdapter'
 import {
+  cancelAllPolymarketOrders,
+  cancelPolymarketOrder,
+  getPolymarketExecutorStatus,
+  isPolymarketLiveArmed,
+  reconcilePolymarketAccount,
+  submitPolymarketOrder,
+  type PolymarketExecutionSide,
+  type PolymarketOrderType,
+} from './polymarketExecutor'
+import {
   closeStateStore,
   getStateStore,
   SqliteStateStore,
@@ -657,6 +667,9 @@ async function tickBot(
     const prevTime = rt.engineState.lastProcessedCandleTime
     const prevOpenEntryTime = rt.engineState.openPosition?.entryTime ?? null
     const prevClosedCount = rt.engineState.closedTrades.length
+    const prevActiveTicketIds = new Set(
+      rt.engineState.activeTickets.map((t) => t.id),
+    )
 
     rt.engineState = trimBotEngineHistory(
       stepBotEngine(rt.engineState, candles, rt.activePreset, {
@@ -672,6 +685,43 @@ async function tickBot(
 
     const exchangeSnap = getExchangeStatusSnapshot(tenantId)
     if (exchangeSnap.autoMirrorBotOrders && !exchangeSnap.killSwitchActive) {
+      if (
+        rt.activePreset.domain === 'prediction-market' &&
+        isPolymarketLiveArmed() &&
+        predictionQuote
+      ) {
+        const openedTickets = rt.engineState.activeTickets.filter(
+          (t) => !prevActiveTicketIds.has(t.id),
+        )
+        for (const ticket of openedTickets) {
+          const polyRes = await submitPolymarketOrder({
+            tenantId,
+            quote: predictionQuote,
+            side: 'BUY',
+            stakeUsd: Math.min(
+              ticket.stakeUsd,
+              exchangeSnap.hardLimits.maxOrderNotionalUsd,
+            ),
+            orderType: 'FOK',
+            clientOrderId: `poly-auto-${rt.activePreset.id}-${ticket.entryBarTime}-${ticket.id}`,
+            nowMs,
+            source: 'bot-auto',
+          })
+          const polyLog: BotEngineLog = {
+            id: Date.now(),
+            timestamp: new Date().toISOString(),
+            level: polyRes.ok ? 'trade' : 'risk',
+            message: polyRes.ok
+              ? `[POLYMARKET CLOB] BUY ${polyRes.order.outcome} ${polyRes.order.instrumentId} $${polyRes.order.stakeUsd.toFixed(2)} @ ${(polyRes.order.limitPrice * 100).toFixed(1)}c (#${polyRes.order.venueOrderId ?? polyRes.order.id})`
+              : `[POLYMARKET BLOCKED] ${polyRes.error}`,
+          }
+          rt.engineState = {
+            ...rt.engineState,
+            logs: [polyLog, ...rt.engineState.logs].slice(0, 80),
+          }
+        }
+      }
+
       const newPos = rt.engineState.openPosition
       if (newPos && newPos.entryTime !== prevOpenEntryTime) {
         const orderRes = await submitExchangeOrder({
@@ -1879,6 +1929,190 @@ export async function handleBotApiRequest(
       },
       responseHeaders,
     )
+    return true
+  }
+
+  // ============================================================================
+  // Polymarket CLOB Live Execution Endpoints
+  // ============================================================================
+
+  // 18. GET /api/polymarket/status -> CLOB executor config, armed flag, orders & last reconciliation
+  if (req.method === 'GET' && url.pathname === '/api/polymarket/status') {
+    if (
+      !enforcePermission(
+        principal,
+        'read:state',
+        res,
+        responseHeaders,
+        url.pathname,
+      )
+    ) {
+      return true
+    }
+    sendJson(res, 200, getPolymarketExecutorStatus(tenantId), responseHeaders)
+    return true
+  }
+
+  // 19. POST /api/polymarket/order -> Submits an EIP-712 + L2 HMAC order to Polymarket CLOB
+  if (req.method === 'POST' && url.pathname === '/api/polymarket/order') {
+    if (
+      !enforcePermission(
+        principal,
+        'trade:execute',
+        res,
+        responseHeaders,
+        url.pathname,
+      )
+    ) {
+      return true
+    }
+    const body = await readOptionalJsonBody<{
+      quote?: ExecutablePredictionQuote
+      side?: PolymarketExecutionSide
+      stakeUsd?: number
+      orderType?: PolymarketOrderType
+      clientOrderId?: string
+    }>(req, res, responseHeaders)
+    if (!body.ok) return true
+    const parsed = body.data
+
+    const clientOrderId =
+      parsed?.clientOrderId?.trim() || `poly-manual-${Date.now()}`
+    const stakeUsd = Number(parsed?.stakeUsd ?? 0)
+    const side: PolymarketExecutionSide =
+      parsed?.side === 'SELL' ? 'SELL' : 'BUY'
+    const orderType: PolymarketOrderType =
+      parsed?.orderType === 'GTC' ||
+      parsed?.orderType === 'GTD' ||
+      parsed?.orderType === 'FAK'
+        ? parsed.orderType
+        : 'FOK'
+
+    const result = await submitPolymarketOrder({
+      tenantId,
+      quote: parsed?.quote,
+      side,
+      stakeUsd,
+      orderType,
+      clientOrderId,
+      source: 'manual',
+    })
+
+    const logEntry: BotEngineLog = {
+      id: Date.now(),
+      timestamp: new Date().toISOString(),
+      level: result.ok ? 'trade' : 'risk',
+      message: result.ok
+        ? `[POLYMARKET CLOB] ${side} ${result.order.outcome} ${result.order.instrumentId} $${result.order.stakeUsd.toFixed(2)} @ ${(result.order.limitPrice * 100).toFixed(1)}c (${result.order.status})`
+        : `[POLYMARKET REJECTED] ${result.error}`,
+    }
+    rt.engineState = {
+      ...rt.engineState,
+      logs: [logEntry, ...rt.engineState.logs].slice(0, 80),
+    }
+    saveStateToDisk(tenantId)
+    recordAudit(
+      principal,
+      'polymarket:order',
+      url.pathname,
+      result.ok ? 'allowed' : 'denied',
+      {
+        orderId: result.order.id,
+        venueOrderId: result.order.venueOrderId ?? null,
+        instrumentId: result.order.instrumentId,
+        stakeUsd: result.order.stakeUsd,
+        status: result.order.status,
+      },
+    )
+    broadcastSseUpdate(tenantId)
+    sendJson(
+      res,
+      200,
+      {
+        ...result,
+        polymarket: getPolymarketExecutorStatus(tenantId),
+      },
+      responseHeaders,
+    )
+    return true
+  }
+
+  // 20. POST /api/polymarket/cancel -> Cancels a specific CLOB order or all open orders
+  if (req.method === 'POST' && url.pathname === '/api/polymarket/cancel') {
+    if (
+      !enforcePermission(
+        principal,
+        'risk:engage_killswitch',
+        res,
+        responseHeaders,
+        url.pathname,
+      )
+    ) {
+      return true
+    }
+    const body = await readOptionalJsonBody<{
+      orderId?: string
+      cancelAll?: boolean
+      reason?: string
+    }>(req, res, responseHeaders)
+    if (!body.ok) return true
+    const parsed = body.data
+
+    const result =
+      parsed?.cancelAll || !parsed?.orderId
+        ? await cancelAllPolymarketOrders(
+            tenantId,
+            parsed?.reason ?? 'Operator cancel-all',
+          )
+        : await cancelPolymarketOrder(parsed.orderId, tenantId)
+
+    recordAudit(
+      principal,
+      'polymarket:cancel',
+      url.pathname,
+      result.ok ? 'allowed' : 'error',
+      {
+        orderId: parsed?.orderId ?? null,
+        cancelAll: Boolean(parsed?.cancelAll || !parsed?.orderId),
+      },
+    )
+    broadcastSseUpdate(tenantId)
+    sendJson(
+      res,
+      200,
+      {
+        ...result,
+        polymarket: getPolymarketExecutorStatus(tenantId),
+      },
+      responseHeaders,
+    )
+    return true
+  }
+
+  // 21. POST /api/polymarket/reconcile -> Syncs live USDC.e collateral, open orders & trades
+  if (req.method === 'POST' && url.pathname === '/api/polymarket/reconcile') {
+    if (
+      !enforcePermission(
+        principal,
+        'read:state',
+        res,
+        responseHeaders,
+        url.pathname,
+      )
+    ) {
+      return true
+    }
+    try {
+      const snapshot = await reconcilePolymarketAccount(tenantId)
+      sendJson(res, 200, snapshot, responseHeaders)
+    } catch (err) {
+      sendJson(
+        res,
+        502,
+        { error: err instanceof Error ? err.message : String(err) },
+        responseHeaders,
+      )
+    }
     return true
   }
 

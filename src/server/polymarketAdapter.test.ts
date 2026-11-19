@@ -44,12 +44,16 @@ describe('polymarketAdapter', () => {
     expect(parsed).toEqual({
       question: 'Bitcoin Up or Down',
       closed: true,
+      conditionId: null,
       upTokenId: 'tok-up',
+      downTokenId: 'tok-down',
       upIndex: 0,
       outcomePrices: [1, 0],
       bestBid: 0.49,
       bestAsk: 0.51,
       volume: 123.45,
+      tickSize: 0.01,
+      negRisk: false,
     })
   })
 

@@ -13,6 +13,7 @@ import {
 import { getStateStore } from './store'
 
 export type ExchangeAdapterMode = 'binance-testnet' | 'demo-vault'
+export type ExchangeOrderVenue = ExchangeAdapterMode | 'polymarket-clob'
 
 export type HardRiskLimits = {
   /** Maximum capital allowed per single order (USD) */
@@ -33,6 +34,7 @@ export type ExchangeBalance = {
 
 export type ExchangeOrderStatus =
   | 'FILLED'
+  | 'LIVE'
   | 'REJECTED_RISK'
   | 'CANCELED_KILLSWITCH'
 
@@ -47,7 +49,7 @@ export type ExchangeOrderRecord = {
   price: number
   quantity: number
   status: ExchangeOrderStatus
-  mode: ExchangeAdapterMode
+  mode: ExchangeOrderVenue
   source: 'manual' | 'bot-auto'
   reason?: string
 }
@@ -248,6 +250,19 @@ export function appendTenantLedgerEntry(
   void getStateStore()
     .appendLedgerEntry(entry)
     .catch(() => {})
+}
+
+/**
+ * Counts an accepted order executed on an external venue (such as Polymarket
+ * CLOB) against the tenant's UTC-day `HardRiskLimits.maxDailyOrders` budget.
+ */
+export function recordExternalVenueOrderCount(
+  tenantId = DEFAULT_TENANT_ID,
+): number {
+  const ctx = getTenantCtx(tenantId)
+  syncDailyCounters(ctx)
+  ctx.dailyOrderCount += 1
+  return ctx.dailyOrderCount
 }
 
 function validateHardRiskLimits(
@@ -613,6 +628,16 @@ export async function submitExchangeOrder(params: {
   }
 }
 
+type KillSwitchVenueHandler = (tenantId: string, reason: string) => Promise<void>
+const killSwitchHandlers = new Map<string, KillSwitchVenueHandler>()
+
+export function registerKillSwitchHandler(
+  name: string,
+  handler: KillSwitchVenueHandler,
+): void {
+  killSwitchHandlers.set(name, handler)
+}
+
 export async function triggerEmergencyKillSwitch(
   reason = 'Emergency stop triggered by operator',
   onHaltBot?: () => void,
@@ -625,6 +650,14 @@ export async function triggerEmergencyKillSwitch(
 
   if (onHaltBot) {
     onHaltBot()
+  }
+
+  for (const handler of killSwitchHandlers.values()) {
+    try {
+      await handler(tenantId, reason)
+    } catch {
+      // Never block kill-switch completion on individual venue errors
+    }
   }
 
   const creds = getTestnetCredentials()

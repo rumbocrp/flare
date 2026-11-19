@@ -1119,3 +1119,89 @@ export async function getTenantAudit(
   )
   return res?.data ?? null
 }
+
+export async function getPolymarketExecutionStatus(): Promise<Record<
+  string,
+  unknown
+> | null> {
+  const res = await fetchFromBackend<Record<string, unknown>>(
+    '/polymarket/status',
+    { method: 'GET' },
+  )
+  return res?.data ?? null
+}
+
+export async function submitPolymarketOrderOnServer(params: {
+  instrumentId: string
+  tokenId: string
+  outcome: 'YES' | 'NO'
+  bid: number
+  ask: number
+  asOfMs: number
+  source?: 'polymarket-clob' | 'polymarket-gamma' | 'explicit-quote'
+  tickSize?: number
+  negRisk?: boolean
+  side?: 'BUY' | 'SELL'
+  stakeUsd: number
+  orderType?: 'GTC' | 'GTD' | 'FOK' | 'FAK'
+  clientOrderId?: string
+}): Promise<Record<string, unknown>> {
+  const clientOrderId =
+    params.clientOrderId ??
+    `poly-manual-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  const res = await fetchFromBackend<Record<string, unknown>>(
+    '/polymarket/order',
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        clientOrderId,
+        side: params.side ?? 'BUY',
+        stakeUsd: params.stakeUsd,
+        orderType: params.orderType ?? 'FOK',
+        quote: {
+          instrumentId: params.instrumentId,
+          tokenId: params.tokenId,
+          outcome: params.outcome,
+          bid: params.bid,
+          ask: params.ask,
+          mid: Number(((params.bid + params.ask) / 2).toFixed(4)),
+          spread: Number(Math.max(0, params.ask - params.bid).toFixed(4)),
+          asOfMs: params.asOfMs,
+          source: params.source ?? 'polymarket-clob',
+          tickSize: params.tickSize ?? 0.01,
+          negRisk: params.negRisk ?? false,
+        },
+      }),
+    },
+  )
+  if (!res) {
+    throw new Error('FLARE backend server unreachable for Polymarket order.')
+  }
+  return res.data
+}
+
+export async function cancelPolymarketOrderOnServer(params: {
+  orderId?: string
+  cancelAll?: boolean
+  reason?: string
+}): Promise<Record<string, unknown> | null> {
+  const res = await fetchFromBackend<Record<string, unknown>>(
+    '/polymarket/cancel',
+    {
+      method: 'POST',
+      body: JSON.stringify(params),
+    },
+  )
+  return res?.data ?? null
+}
+
+export async function reconcilePolymarketAccountOnServer(): Promise<Record<
+  string,
+  unknown
+> | null> {
+  const res = await fetchFromBackend<Record<string, unknown>>(
+    '/polymarket/reconcile',
+    { method: 'POST' },
+  )
+  return res?.data ?? null
+}
