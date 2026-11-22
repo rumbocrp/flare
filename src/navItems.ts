@@ -10,6 +10,7 @@ type NavItem = {
 const navItems: NavItem[] = [
   { id: 'dashboard', label: 'Dashboard', labelKey: 'nav.dashboard' },
   { id: 'bot-config', label: 'Bot setup', labelKey: 'nav.botConfig' },
+  { id: 'training', label: 'Training', labelKey: 'nav.training' },
   { id: 'bot-run', label: 'Run bot', labelKey: 'nav.botRun' },
   { id: 'backtest', label: 'Backtest', labelKey: 'nav.backtest' },
   { id: 'predictions', label: 'Predictions', labelKey: 'nav.predictions' },

@@ -1,0 +1,158 @@
+- generic [ref=f1e3]:
+  - banner [ref=f1e4]:
+    - generic [ref=f1e6]:
+      - generic [ref=f1e7]: FLARE
+      - generic [aria-hidden] [ref=f1e12]: /
+      - generic [ref=f1e13]: Dashboard
+  - main [ref=f1e14]:
+    - generic [ref=f1e15]:
+      - generic [ref=f1e16]:
+        - heading "FLARE" [level=1] [ref=f1e17]
+        - generic [ref=f1e18]:
+          - button "Charts" [ref=f1e19] [cursor=pointer]
+          - button "Run Bot" [ref=f1e21] [cursor=pointer]
+      - generic [ref=f1e23]:
+        - generic [ref=f1e24]:
+          - generic [ref=f1e25]: Balance
+          - strong [ref=f1e26]: $10,000.00
+          - generic [ref=f1e27]:
+            - generic [ref=f1e28]:
+              - text: Avail.
+              - strong [ref=f1e29]: $10,000.00
+            - generic [ref=f1e30]: USDT $10,000.00
+        - generic [ref=f1e31]:
+          - generic [ref=f1e32]:
+            - generic [ref=f1e33]: P & L
+            - generic [ref=f1e34]: +0.00% DAY
+          - strong [ref=f1e35]: $0.00
+          - generic [ref=f1e37]:
+            - generic [ref=f1e38]:
+              - text: Day
+              - strong [ref=f1e39]: $0.00
+            - generic [ref=f1e40]:
+              - text: ROI
+              - strong [ref=f1e41]: +0.00%
+        - generic [ref=f1e42]:
+          - generic [ref=f1e43]:
+            - generic [ref=f1e44]: Win Rate
+            - generic [ref=f1e45]: 0 ops
+          - strong [ref=f1e46]: —
+          - generic [ref=f1e47]:
+            - generic [ref=f1e48]: 0W · 0L
+            - generic [ref=f1e49]: $0.00
+        - generic [ref=f1e50]:
+          - generic [ref=f1e51]:
+            - generic [ref=f1e52]: Bot Status
+            - generic [ref=f1e53]: STOPPED
+          - strong [ref=f1e54]: BTC/USDT
+          - generic [ref=f1e55]:
+            - generic [ref=f1e56]:
+              - text: SL/TP
+              - strong [ref=f1e57]: 2%/4%
+            - generic [ref=f1e58]:
+              - text: Cap
+              - strong [ref=f1e59]: 3%
+      - generic [ref=f1e60]:
+        - generic [ref=f1e61]:
+          - heading "Markets (15m)" [level=2] [ref=f1e62]
+          - generic [ref=f1e63]:
+            - tablist "Mini chart timeframe" [ref=f1e65]:
+              - tab "5m" [ref=f1e66] [cursor=pointer]
+              - tab "15m" [selected] [ref=f1e67] [cursor=pointer]
+              - tab "1h" [ref=f1e68] [cursor=pointer]
+              - tab "4h" [ref=f1e69] [cursor=pointer]
+              - tab "1d" [ref=f1e70] [cursor=pointer]
+            - button "Refresh markets" [ref=f1e71] [cursor=pointer]
+        - generic [ref=f1e72]:
+          - button "BTC/USDT ... Open full chart for BTC/USDT Loading... 15m · 48" [pressed] [ref=f1e73] [cursor=pointer]:
+            - generic [ref=f1e74]:
+              - generic [ref=f1e75]:
+                - generic [ref=f1e76]: BTC/USDT
+                - generic [ref=f1e79]:
+                  - generic [ref=f1e80]: ...
+                  - button "Open full chart for BTC/USDT" [ref=f1e81]
+              - generic [ref=f1e87]: Loading...
+            - generic [ref=f1e90]: 15m · 48
+          - button "ETH/USDT ... Open full chart for ETH/USDT Loading... 15m · 48" [ref=f1e92] [cursor=pointer]:
+            - generic [ref=f1e93]:
+              - generic [ref=f1e94]:
+                - generic [ref=f1e95]: ETH/USDT
+                - generic [ref=f1e97]:
+                  - generic [ref=f1e98]: ...
+                  - button "Open full chart for ETH/USDT" [ref=f1e99]
+              - generic [ref=f1e105]: Loading...
+            - generic [ref=f1e108]: 15m · 48
+          - button "SOL/USDT ... Open full chart for SOL/USDT Loading... 15m · 48" [ref=f1e110] [cursor=pointer]:
+            - generic [ref=f1e111]:
+              - generic [ref=f1e112]:
+                - generic [ref=f1e113]: SOL/USDT
+                - generic [ref=f1e115]:
+                  - generic [ref=f1e116]: ...
+                  - button "Open full chart for SOL/USDT" [ref=f1e117]
+              - generic [ref=f1e123]: Loading...
+            - generic [ref=f1e126]: 15m · 48
+          - button "XRP/USDT ... Open full chart for XRP/USDT Loading... 15m · 48" [ref=f1e128] [cursor=pointer]:
+            - generic [ref=f1e129]:
+              - generic [ref=f1e130]:
+                - generic [ref=f1e131]: XRP/USDT
+                - generic [ref=f1e133]:
+                  - generic [ref=f1e134]: ...
+                  - button "Open full chart for XRP/USDT" [ref=f1e135]
+              - generic [ref=f1e141]: Loading...
+            - generic [ref=f1e144]: 15m · 48
+          - button "DOGE/USDT ... Open full chart for DOGE/USDT Loading... 15m · 48" [ref=f1e146] [cursor=pointer]:
+            - generic [ref=f1e147]:
+              - generic [ref=f1e148]:
+                - generic [ref=f1e149]: DOGE/USDT
+                - generic [ref=f1e151]:
+                  - generic [ref=f1e152]: ...
+                  - button "Open full chart for DOGE/USDT" [ref=f1e153]
+              - generic [ref=f1e159]: Loading...
+            - generic [ref=f1e162]: 15m · 48
+      - generic [ref=f1e164]:
+        - generic [ref=f1e165]:
+          - generic [ref=f1e166]:
+            - generic [ref=f1e167]: Predictive Options · BTC/USDT (15m)
+            - generic [ref=f1e168]:
+              - tablist "Prediction timeframe" [ref=f1e170]:
+                - tab "5m" [ref=f1e171] [cursor=pointer]
+                - tab "15m" [selected] [ref=f1e172] [cursor=pointer]
+                - tab "1h" [ref=f1e173] [cursor=pointer]
+                - tab "4h" [ref=f1e174] [cursor=pointer]
+                - tab "1d" [ref=f1e175] [cursor=pointer]
+              - button "View 20" [ref=f1e176] [cursor=pointer]
+          - status [ref=f1e179]:
+            - generic [ref=f1e183]: Evaluating BTC/USDT (15m)...
+        - generic [ref=f1e184]:
+          - generic [ref=f1e185]:
+            - generic [ref=f1e186]: Executed Win-Rate History
+            - button "Statistics" [ref=f1e187] [cursor=pointer]
+          - generic [ref=f1e189]:
+            - generic [ref=f1e190]:
+              - generic [ref=f1e191]:
+                - generic [ref=f1e192]: OPS
+                - strong [ref=f1e193]: 0 (0W·0L)
+              - generic [ref=f1e194]:
+                - generic [ref=f1e195]: WIN RATE
+                - strong [ref=f1e196]: —
+              - generic [ref=f1e197]:
+                - generic [ref=f1e198]: P&L
+                - strong [ref=f1e199]: $0.00
+            - generic [ref=f1e200]:
+              - generic [ref=f1e201]: No closed operations in this live session yet.
+              - button "Run Bot" [ref=f1e202] [cursor=pointer]
+      - generic [ref=f1e205]:
+        - generic [ref=f1e206]:
+          - generic [ref=f1e207]: Recent Backtests
+          - button "Run Backtest" [ref=f1e209] [cursor=pointer]
+        - generic [ref=f1e212]:
+          - generic [ref=f1e213]: No backtest runs saved yet. Run a simulation to plot the equity curve and compare strategies here.
+          - button "Open Backtest" [ref=f1e214] [cursor=pointer]
+  - region "Main navigation":
+    - navigation "Main navigation" [ref=f1e216]:
+      - button "Dashboard" [ref=f1e217] [cursor=pointer]
+      - button "Run bot" [ref=f1e225] [cursor=pointer]
+      - button "Backtest" [ref=f1e231] [cursor=pointer]
+      - button "Predictions" [ref=f1e238] [cursor=pointer]
+      - button "Statistics" [ref=f1e245] [cursor=pointer]
+      - button "More" [ref=f1e251] [cursor=pointer]

@@ -1,0 +1,217 @@
+- generic [ref=e1]:
+  - generic [ref=e3]:
+    - banner [ref=e4]:
+      - generic [ref=e6]:
+        - button "Back to Dashboard" [ref=e463] [cursor=pointer]:
+          - generic [ref=e464]: Dashboard
+        - generic [ref=e7]: FLARE
+        - generic [aria-hidden] [ref=e12]: /
+        - generic [ref=e13]: Training
+    - main [ref=e14]:
+      - generic [ref=e465]:
+        - generic [ref=e466]:
+          - heading "Training" [level=1] [ref=e467]
+          - button "Run training" [ref=e469] [cursor=pointer]
+        - region "Active training run status" [ref=e471]:
+          - generic [ref=e473]:
+            - generic [ref=e474]: IDLE
+            - generic [ref=e479]: 1. BTC 5m Scalp
+            - generic [ref=e480]: BTC/USDT · 5m
+            - generic [ref=e481]: 2026-11-08 00:00 → 2026-11-22 23:52
+        - generic [ref=e482]:
+          - complementary "Strategy catalog" [ref=e483]:
+            - generic [ref=e484]:
+              - generic [ref=e485]:
+                - button "Strategy catalog" [expanded] [ref=e486] [cursor=pointer]
+                - generic [ref=e490]: 13/13
+              - generic [ref=e491]:
+                - textbox "Search strategies, pairs, timeframes…" [ref=e493]
+                - group "Filter by strategy family" [ref=e494]:
+                  - button "All" [ref=e495] [cursor=pointer]
+                  - button "Trend / Momentum" [ref=e496] [cursor=pointer]
+                  - button "Mean Reversion" [ref=e497] [cursor=pointer]
+                  - button "Support & Resistance" [ref=e498] [cursor=pointer]
+                  - button "Break of Structure" [ref=e499] [cursor=pointer]
+                  - button "Donchian Breakout" [ref=e500] [cursor=pointer]
+                  - button "Prediction Market" [ref=e501] [cursor=pointer]
+                - generic [ref=e502]:
+                  - generic [ref=e503]:
+                    - heading "Trend / Momentum" [level=3] [ref=e504]
+                    - generic [ref=e505]:
+                      - button "1. BTC 5m Scalp No run BTC/USDT · 5m" [ref=e506] [cursor=pointer]:
+                        - generic [ref=e507]:
+                          - generic [ref=e508]: 1. BTC 5m Scalp
+                          - generic [ref=e509]: No run
+                        - generic [ref=e510]: BTC/USDT · 5m
+                      - button "2. BTC 15m Pullback No run BTC/USDT · 15m" [ref=e512] [cursor=pointer]:
+                        - generic [ref=e513]:
+                          - generic [ref=e514]: 2. BTC 15m Pullback
+                          - generic [ref=e515]: No run
+                        - generic [ref=e516]: BTC/USDT · 15m
+                      - button "3. ETH 1h Swing No run ETH/USDT · 1h" [ref=e518] [cursor=pointer]:
+                        - generic [ref=e519]:
+                          - generic [ref=e520]: 3. ETH 1h Swing
+                          - generic [ref=e521]: No run
+                        - generic [ref=e522]: ETH/USDT · 1h
+                      - button "4. SOL 4h Trend (EMA 12/26) No run SOL/USDT · 4h" [ref=e524] [cursor=pointer]:
+                        - generic [ref=e525]:
+                          - generic [ref=e526]: 4. SOL 4h Trend (EMA 12/26)
+                          - generic [ref=e527]: No run
+                        - generic [ref=e528]: SOL/USDT · 4h
+                      - button "5. BTC 1d Swing (SMA 12/50) No run BTC/USDT · 1d" [ref=e530] [cursor=pointer]:
+                        - generic [ref=e531]:
+                          - generic [ref=e532]: 5. BTC 1d Swing (SMA 12/50)
+                          - generic [ref=e533]: No run
+                        - generic [ref=e534]: BTC/USDT · 1d
+                      - button "EMA/SMA Crossover Template No run BTC/USDT · 15m Template" [ref=e536] [cursor=pointer]:
+                        - generic [ref=e537]:
+                          - generic [ref=e538]: EMA/SMA Crossover Template
+                          - generic [ref=e539]: No run
+                        - generic [ref=e540]:
+                          - generic [ref=e541]: BTC/USDT · 15m
+                          - generic [ref=e542]: Template
+                  - generic [ref=e546]:
+                    - heading "Mean Reversion" [level=3] [ref=e547]
+                    - button "RSI Mean Reversion Template No run ETH/USDT · 15m Template" [ref=e549] [cursor=pointer]:
+                      - generic [ref=e550]:
+                        - generic [ref=e551]: RSI Mean Reversion Template
+                        - generic [ref=e552]: No run
+                      - generic [ref=e553]:
+                        - generic [ref=e554]: ETH/USDT · 15m
+                        - generic [ref=e555]: Template
+                  - generic [ref=e559]:
+                    - heading "Support & Resistance" [level=3] [ref=e560]
+                    - button "10. ETH 1h Support & Resistance No run ETH/USDT · 1h" [ref=e562] [cursor=pointer]:
+                      - generic [ref=e563]:
+                        - generic [ref=e564]: 10. ETH 1h Support & Resistance
+                        - generic [ref=e565]: No run
+                      - generic [ref=e566]: ETH/USDT · 1h
+                  - generic [ref=e568]:
+                    - heading "Break of Structure" [level=3] [ref=e569]
+                    - button "11. SOL 15m Break of Structure No run SOL/USDT · 15m" [ref=e571] [cursor=pointer]:
+                      - generic [ref=e572]:
+                        - generic [ref=e573]: 11. SOL 15m Break of Structure
+                        - generic [ref=e574]: No run
+                      - generic [ref=e575]: SOL/USDT · 15m
+                  - generic [ref=e577]:
+                    - heading "Donchian Breakout" [level=3] [ref=e578]
+                    - button "9. BTC 1h Donchian Breakout No run BTC/USDT · 1h" [ref=e580] [cursor=pointer]:
+                      - generic [ref=e581]:
+                        - generic [ref=e582]: 9. BTC 1h Donchian Breakout
+                        - generic [ref=e583]: No run
+                      - generic [ref=e584]: BTC/USDT · 1h
+                  - generic [ref=e586]:
+                    - heading "Prediction Market" [level=3] [ref=e587]
+                    - generic [ref=e588]:
+                      - button "6. BTC Below SMA 20 (15m) No run BTC/USDT · 15m" [ref=e589] [cursor=pointer]:
+                        - generic [ref=e590]:
+                          - generic [ref=e591]: 6. BTC Below SMA 20 (15m)
+                          - generic [ref=e592]: No run
+                        - generic [ref=e593]: BTC/USDT · 15m
+                      - button "7. BTC Inside Bar Breakout (4h) No run BTC/USDT · 4h" [ref=e595] [cursor=pointer]:
+                        - generic [ref=e596]:
+                          - generic [ref=e597]: 7. BTC Inside Bar Breakout (4h)
+                          - generic [ref=e598]: No run
+                        - generic [ref=e599]: BTC/USDT · 4h
+                      - button "8. BTC 3-Day Rebound (1d) No run BTC/USDT · 1d" [ref=e601] [cursor=pointer]:
+                        - generic [ref=e602]:
+                          - generic [ref=e603]: 8. BTC 3-Day Rebound (1d)
+                          - generic [ref=e604]: No run
+                        - generic [ref=e605]: BTC/USDT · 1d
+          - generic [ref=e607]:
+            - region "Run configuration" [ref=e608]:
+              - generic [ref=e609]:
+                - heading "Run configuration" [level=2] [ref=e611]
+                - button "Run training" [ref=e612] [cursor=pointer]
+              - generic [ref=e614]:
+                - generic [ref=e615]:
+                  - generic [ref=e616]: Run kind
+                  - combobox "Run kind" [ref=e617] [cursor=pointer]:
+                    - generic: Walk-Forward (Fit → Val → Test)
+                - generic [ref=e620]:
+                  - generic [ref=e621]: Pair
+                  - combobox "Pair" [ref=e622] [cursor=pointer]:
+                    - generic: BTC/USDT
+                - generic [ref=e625]:
+                  - generic [ref=e626]: Timeframe
+                  - combobox "Timeframe" [ref=e627] [cursor=pointer]:
+                    - generic: 5m
+                - generic [ref=e630]:
+                  - generic [ref=e631]: Date range (UTC)
+                  - generic [ref=e632]:
+                    - button "30d" [ref=e633] [cursor=pointer]
+                    - button "90d" [ref=e634] [cursor=pointer]
+                    - button "180d" [ref=e635] [cursor=pointer]
+                    - button "365d" [ref=e636] [cursor=pointer]
+                    - button "Custom" [ref=e637] [cursor=pointer]
+              - generic [ref=e638]:
+                - generic [ref=e639]:
+                  - generic [ref=e640]: From (UTC)
+                  - textbox "From (UTC)" [ref=e641]: 2026-11-08
+                - generic [ref=e642]:
+                  - generic [ref=e643]: To (UTC)
+                  - textbox "To (UTC)" [ref=e644]: 2026-11-22
+              - generic [ref=e645]:
+                - generic [ref=e646]:
+                  - generic [ref=e647]: Folds
+                  - combobox "Folds" [ref=e648] [cursor=pointer]:
+                    - generic: "5"
+                - generic [ref=e651]:
+                  - generic [ref=e652]: Window mode
+                  - combobox "Window mode" [ref=e653] [cursor=pointer]:
+                    - generic: Anchored
+                - generic [ref=e656]:
+                  - generic [ref=e657]: Train %
+                  - spinbutton "Train %" [ref=e658]: "55"
+                - generic [ref=e659]:
+                  - generic [ref=e660]: Val %
+                  - spinbutton "Val %" [ref=e661]: "20"
+                - generic [ref=e662]:
+                  - generic [ref=e663]: Test %
+                  - spinbutton "Test %" [ref=e664]: "25"
+                - generic [ref=e665]:
+                  - generic [ref=e666]: Purge bars
+                  - spinbutton "Purge bars" [ref=e667]: "5"
+                - generic [ref=e668]:
+                  - generic [ref=e669]: Fee %
+                  - spinbutton "Fee %" [ref=e670]: "0.04"
+                - generic [ref=e671]:
+                  - generic [ref=e672]: Slip %
+                  - spinbutton "Slip %" [ref=e673]: "0.01"
+              - generic [ref=e674]:
+                - generic [ref=e675]:
+                  - generic [ref=e676]:
+                    - generic [ref=e677]: Initial balance ($)
+                    - spinbutton "Initial balance ($)" [ref=e678]: "10000"
+                  - generic [ref=e679]:
+                    - switch "Allow short" [checked] [ref=e680] [cursor=pointer]
+                    - generic [ref=e681] [cursor=pointer]: Allow short
+                - generic [ref=e682]:
+                  - generic [ref=e683]: "Estimated: 4319 / 5000 candles"
+                  - generic [ref=e684]: "Test fold: ~1d 20h"
+              - generic [ref=e685]:
+                - generic [ref=e686]: Total window is 15 days (< 60 days). Out-of-sample reliability may be limited.
+                - generic [ref=e690]: Each held-out test fold is ~1d 20h (< 14 days).
+            - generic [ref=e694]:
+              - tablist [ref=e695]:
+                - tab "Overview" [selected] [ref=e696] [cursor=pointer]
+                - tab "Folds" [ref=e697] [cursor=pointer]
+                - tab "Trades" [ref=e698] [cursor=pointer]
+                - tab "Equity" [ref=e699] [cursor=pointer]
+                - tab "Backtest" [ref=e700] [cursor=pointer]
+              - tabpanel "Overview" [ref=e701]
+        - region "Run history" [ref=e709]:
+          - generic [ref=e710]:
+            - button "Run history (0)" [expanded] [ref=e711] [cursor=pointer]:
+              - generic [ref=e714]: Run history
+              - generic [ref=e715]: (0)
+            - button "Refresh" [disabled]
+    - region "Main navigation":
+      - navigation "Main navigation" [ref=e216]:
+        - button "Dashboard" [ref=e217] [cursor=pointer]
+        - button "Run bot" [ref=e225] [cursor=pointer]
+        - button "Backtest" [ref=e231] [cursor=pointer]
+        - button "Predictions" [ref=e238] [cursor=pointer]
+        - button "Statistics" [ref=e245] [cursor=pointer]
+        - button "More" [active] [ref=e251] [cursor=pointer]
+  - tooltip "More options" [ref=e722]

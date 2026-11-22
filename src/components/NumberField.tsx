@@ -40,7 +40,7 @@ function NumberField({
           aria-invalid={Boolean(error)}
           aria-describedby={error || hint ? helpId : undefined}
         />
-        <span className="inline-flex h-8 min-w-[38px] shrink-0 items-center justify-center rounded-sm border border-border bg-secondary/60 px-1.5 font-mono text-[10.5px] font-medium text-muted-foreground">
+        <span className="inline-flex h-8 min-w-[38px] shrink-0 items-center justify-center rounded-sm bg-muted/45 px-1.5 font-mono text-[10.5px] font-medium text-muted-foreground">
           {unit}
         </span>
       </div>

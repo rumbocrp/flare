@@ -257,7 +257,15 @@ describe('P0-3 Security: Auth, RBAC, Multi-Tenant Isolation, Rate Limits & Stric
     await handleBotApiRequest(betaReq, betaRes)
     expect(betaChunks).toHaveLength(1)
 
-    // Tenant Alpha places an order and triggers kill-switch
+    // Tenant Alpha explicitly funds its PAPER account, places an order, and triggers kill-switch
+    const alphaFund = await invokeApi({
+      method: 'POST',
+      url: '/api/paper/fund',
+      headers: { Authorization: 'Bearer tok-alpha-admin-444' },
+      body: { amountUsd: 10_000 },
+    })
+    expect(alphaFund.status).toBe(200)
+
     const alphaOrder = await invokeApi({
       method: 'POST',
       url: '/api/exchange/order',

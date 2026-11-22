@@ -1,81 +1,78 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  ArrowRight,
   BarChart3,
   CheckCircle2,
   FlaskConical,
-  Lock,
-  Play,
-  Radio,
-  RotateCcw,
+  Keyboard,
+  RefreshCw,
   ShieldAlert,
   SlidersHorizontal,
-  Square,
-  Zap,
+  WifiOff,
+  X,
 } from 'lucide-react'
 import {
   buildBacktestSnapshotFromBot,
-  fetchBotAccuracyAudit,
+  cancelExchangeOrderOnServer,
+  closePositionOnServer,
+  fetchExchangeAccount,
+  fetchExchangeOrders,
+  fetchLatestBotAccuracyAudit,
+  fetchMarketCandlesFromGateway,
+  fetchRuntimeEvents,
+  fundPaperAccountOnServer,
   getBotStatus,
+  pauseBotOnServer,
   resetBotOnServer,
-  resetExchangeVaultOnServer,
+  resumeBotOnServer,
   selectBotPresetOnServer,
-  simulateMt5PingOnServer,
   startBotOnServer,
   stopBotOnServer,
-  submitDemoOrderOnServer,
+  submitExchangeOrderOnServer,
   subscribeToBotStream,
+  subscribeToMarketGatewayStream,
   toggleExchangeKillSwitchOnServer,
   triggerImmediateBotTick,
   updateHardLimitsOnServer,
-  type BotAccuracyResponse,
   type BotServerSnapshot,
-  type Mt5SignalPacket,
+  type ExchangeAccountResponse,
+  type ExchangeOrderRecord,
+  type HardRiskLimits,
+  type RuntimeEventRecord,
+  type StrategyAuditRecord,
+  type StreamConnectionStatus,
 } from '@/api/botClient'
 import type { BacktestSnapshot } from '@/backtest'
-import { STRATEGY_PRESETS } from '@/botEngine'
+import {
+  loadBotRunSectionState,
+  saveBotRunSectionState,
+  type BotRunSectionId,
+  type BotRunSectionState,
+} from '@/botRunUtils'
 import PageHeader from '@/components/PageHeader'
-import TradesTable from '@/components/TradesTable'
+import AccountCard from '@/components/botrun/AccountCard'
+import ClosedTradesCard from '@/components/botrun/ClosedTradesCard'
+import CommandBar from '@/components/botrun/CommandBar'
+import EventLogCard from '@/components/botrun/EventLogCard'
+import Mt5BridgeCard from '@/components/botrun/Mt5BridgeCard'
+import OrdersCard from '@/components/botrun/OrdersCard'
+import PositionsCard from '@/components/botrun/PositionsCard'
+import RiskLimitsCard from '@/components/botrun/RiskLimitsCard'
+import StrategyAuditCard from '@/components/botrun/StrategyAuditCard'
 import {
   AlertDialog,
   AlertDialogAction,
-  AlertDialogCancel,
   AlertDialogContent,
   AlertDialogDescription,
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
-  AlertDialogTrigger,
 } from '@/components/ui/alert-dialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from '@/components/ui/card'
-import { ScrollArea } from '@/components/ui/scroll-area'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
-import { Switch } from '@/components/ui/switch'
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table'
+import { Card, CardContent } from '@/components/ui/card'
 import { useI18n } from '@/i18n'
 import { cn } from '@/lib/utils'
-import type { BotStatus, PageId, Strategy } from '@/types'
+import type { BotStatus, Interval, PageId, Strategy } from '@/types'
 
 type BotRunProps = {
   status: BotStatus
@@ -85,30 +82,186 @@ type BotRunProps = {
   onSaveSnapshot?: (snapshot: BacktestSnapshot) => void
 }
 
+function deriveBotStatus(snap: BotServerSnapshot): BotStatus {
+  if (snap.running) return 'running'
+  if (snap.paused) return 'paused'
+  return 'stopped'
+}
+
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false
+  const tag = target.tagName
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true
+  if (target.isContentEditable) return true
+  return Boolean(
+    target.closest('[contenteditable="true"], [role="combobox"], [role="textbox"]'),
+  )
+}
+
 function BotRun({
-  status,
   onChangeStatus,
   strategy,
   onNavigate,
   onSaveSnapshot,
 }: BotRunProps) {
-  const { t, language } = useI18n()
-  const isEs = language === 'es'
+  const { t } = useI18n()
 
   const [snapshot, setSnapshot] = useState<BotServerSnapshot | null>(null)
-  const [busyAction, setBusyAction] = useState<string | null>(null)
-  const [auditReport, setAuditReport] = useState<BotAccuracyResponse | null>(
-    null,
+  const [streamStatus, setStreamStatus] =
+    useState<StreamConnectionStatus>('connecting')
+  const [lastSseAt, setLastSseAt] = useState<string | null>(null)
+  const [initialLoaded, setInitialLoaded] = useState(false)
+  const [retryNonce, setRetryNonce] = useState(0)
+
+  const [account, setAccount] = useState<ExchangeAccountResponse | null>(null)
+  const [accountLoading, setAccountLoading] = useState(false)
+  const [accountError, setAccountError] = useState<string | null>(null)
+
+  const [orders, setOrders] = useState<ExchangeOrderRecord[]>([])
+  const [ordersLoading, setOrdersLoading] = useState(false)
+  const [ordersError, setOrdersError] = useState<string | null>(null)
+  const [ordersSyncedAt, setOrdersSyncedAt] = useState<string | null>(null)
+
+  const [events, setEvents] = useState<RuntimeEventRecord[]>([])
+  const [eventsLoading, setEventsLoading] = useState(false)
+  const [eventsError, setEventsError] = useState<string | null>(null)
+  const [eventsSyncedAt, setEventsSyncedAt] = useState<string | null>(null)
+
+  const [audits, setAudits] = useState<StrategyAuditRecord[]>([])
+  const [auditsLoading, setAuditsLoading] = useState(false)
+  const [auditsError, setAuditsError] = useState<string | null>(null)
+
+  const [liveMark, setLiveMark] = useState<{
+    pair: string
+    price: number
+  } | null>(null)
+
+  const [sections, setSections] = useState<BotRunSectionState>(() =>
+    loadBotRunSectionState(),
   )
-  const [exchangeFeedback, setExchangeFeedback] = useState<{
+  const [busyAction, setBusyAction] = useState<string | null>(null)
+  const [confirmKillOpen, setConfirmKillOpen] = useState(false)
+  const [confirmCloseOpen, setConfirmCloseOpen] = useState(false)
+  const [shortcutsOpen, setShortcutsOpen] = useState(false)
+  const [feedback, setFeedback] = useState<{
     tone: 'pos' | 'neg'
     message: string
   } | null>(null)
-  const [lastMt5Packet, setLastMt5Packet] = useState<Mt5SignalPacket | null>(
-    null,
+
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
+
+  const toggleSection = useCallback((id: BotRunSectionId) => {
+    setSections((prev) => {
+      const next = { ...prev, [id]: !prev[id] }
+      saveBotRunSectionState(next)
+      return next
+    })
+  }, [])
+
+  const ensureSectionOpen = useCallback((id: BotRunSectionId) => {
+    setSections((prev) => {
+      if (prev[id]) return prev
+      const next = { ...prev, [id]: true }
+      saveBotRunSectionState(next)
+      return next
+    })
+  }, [])
+
+  const sectionTogglers = useMemo(
+    () => ({
+      account: () => toggleSection('account'),
+      positions: () => toggleSection('positions'),
+      orders: () => toggleSection('orders'),
+      risk: () => toggleSection('risk'),
+      mt5: () => toggleSection('mt5'),
+      audit: () => toggleSection('audit'),
+      events: () => toggleSection('events'),
+      trades: () => toggleSection('trades'),
+    }),
+    [toggleSection],
   )
-  const [confirmKillOpen, setConfirmKillOpen] = useState(false)
-  const [confirmResetOpen, setConfirmResetOpen] = useState(false)
+
+  const refreshAccount = useCallback(async (silent = false) => {
+    if (!silent) setAccountLoading(true)
+    setAccountError(null)
+    try {
+      const res = await fetchExchangeAccount()
+      if (!mountedRef.current) return
+      setAccount(res)
+    } catch (err) {
+      if (!mountedRef.current) return
+      setAccountError(err instanceof Error ? err.message : String(err))
+    } finally {
+      if (mountedRef.current && !silent) setAccountLoading(false)
+    }
+  }, [])
+
+  const refreshOrders = useCallback(async (silent = false) => {
+    if (!silent) setOrdersLoading(true)
+    setOrdersError(null)
+    try {
+      const list = await fetchExchangeOrders({ limit: 200 })
+      if (!mountedRef.current) return
+      setOrders(list)
+      setOrdersSyncedAt(
+        list[0]?.updatedAt ?? list[0]?.timestamp ?? new Date().toISOString(),
+      )
+    } catch (err) {
+      if (!mountedRef.current) return
+      setOrdersError(err instanceof Error ? err.message : String(err))
+    } finally {
+      if (mountedRef.current && !silent) setOrdersLoading(false)
+    }
+  }, [])
+
+  const refreshEvents = useCallback(async (silent = false) => {
+    if (!silent) setEventsLoading(true)
+    setEventsError(null)
+    try {
+      const list = await fetchRuntimeEvents({ limit: 300 })
+      if (!mountedRef.current) return
+      setEvents(list)
+      setEventsSyncedAt(list[0]?.timestamp ?? new Date().toISOString())
+    } catch (err) {
+      if (!mountedRef.current) return
+      setEventsError(err instanceof Error ? err.message : String(err))
+    } finally {
+      if (mountedRef.current && !silent) setEventsLoading(false)
+    }
+  }, [])
+
+  const refreshAudits = useCallback(async (silent = false) => {
+    if (!silent) setAuditsLoading(true)
+    setAuditsError(null)
+    try {
+      const list = await fetchLatestBotAccuracyAudit()
+      if (!mountedRef.current) return
+      setAudits(list)
+    } catch (err) {
+      if (!mountedRef.current) return
+      setAuditsError(err instanceof Error ? err.message : String(err))
+    } finally {
+      if (mountedRef.current && !silent) setAuditsLoading(false)
+    }
+  }, [])
+
+  const refreshAllSqlViews = useCallback(
+    async (silent = false) => {
+      await Promise.allSettled([
+        refreshAccount(silent),
+        refreshOrders(silent),
+        refreshEvents(silent),
+        ...(silent ? [] : [refreshAudits(false)]),
+      ])
+    },
+    [refreshAccount, refreshOrders, refreshEvents, refreshAudits],
+  )
 
   useEffect(() => {
     let active = true
@@ -116,1218 +269,710 @@ function BotRun({
     getBotStatus().then((snap) => {
       if (!active) return
       setSnapshot(snap)
-      onChangeStatus(snap.running ? 'running' : 'stopped')
+      setInitialLoaded(true)
+      if (snap) {
+        setLastSseAt(new Date().toISOString())
+        onChangeStatus(deriveBotStatus(snap))
+        void refreshAllSqlViews(false)
+      } else {
+        setStreamStatus('offline')
+        setAccount(null)
+        setOrders([])
+        setEvents([])
+        setAudits([])
+      }
     })
 
-    const unsubscribe = subscribeToBotStream((snap) => {
-      if (!active) return
-      setSnapshot(snap)
-      onChangeStatus(snap.running ? 'running' : 'stopped')
-    })
+    const unsubscribe = subscribeToBotStream(
+      (snap) => {
+        if (!active) return
+        setSnapshot(snap)
+        setLastSseAt(new Date().toISOString())
+        setInitialLoaded(true)
+        onChangeStatus(deriveBotStatus(snap))
+        void refreshAllSqlViews(true)
+      },
+      {
+        onStatusChange: (nextStatus) => {
+          if (!active) return
+          setStreamStatus(nextStatus)
+          if (nextStatus === 'offline') {
+            setInitialLoaded(true)
+          }
+        },
+      },
+    )
 
     return () => {
       active = false
       unsubscribe()
     }
-  }, [onChangeStatus])
+  }, [onChangeStatus, refreshAllSqlViews, retryNonce])
 
-  const activePreset = snapshot?.preset ?? STRATEGY_PRESETS[1]
-  const engineState = snapshot?.state
-  const telemetry = snapshot?.telemetry
-  const exchange = snapshot?.exchange
-  const mt5 = snapshot?.mt5
-  const isRunning = snapshot ? snapshot.running : status === 'running'
-  const presets = snapshot?.presets ?? STRATEGY_PRESETS
+  // Live mark-price subscription for real unrealized PnL & ticket estimates
+  const markPair =
+    snapshot?.state.openPosition?.pair ??
+    snapshot?.exchange?.botOwnedPosition?.pair ??
+    snapshot?.preset.strategy.pair ??
+    null
 
-  const balance = engineState?.balance ?? activePreset.execution.initialBalance
-  const initialBalance =
-    engineState?.initialBalance ?? activePreset.execution.initialBalance
-  const lockedStake =
-    engineState?.activeTickets.reduce((acc, tk) => acc + tk.stakeUsd, 0) ?? 0
-  const totalEquity = balance + lockedStake
-  const netPnl = totalEquity - initialBalance
-  const netPnlPct = initialBalance > 0 ? (netPnl / initialBalance) * 100 : 0
-  const closedTrades = engineState?.closedTrades ?? []
-  const resolvedTickets = engineState?.resolvedTickets ?? []
-  const killSwitchActive = exchange?.killSwitchActive ?? false
-  const activeMt5Packet = lastMt5Packet ?? mt5?.lastPacket
+  useEffect(() => {
+    if (!markPair) return
+    let active = true
+    const controller = new AbortController()
 
-  async function handleStart() {
-    setBusyAction('start')
-    try {
-      const next = await startBotOnServer({ presetId: activePreset.id })
-      setSnapshot(next)
-      onChangeStatus(next.running ? 'running' : 'stopped')
-    } finally {
-      setBusyAction(null)
+    fetchMarketCandlesFromGateway(markPair, '5m', 2, controller.signal).then(
+      (res) => {
+        if (!active || !res || res.candles.length === 0) return
+        const last = res.candles[res.candles.length - 1]
+        if (last && Number.isFinite(last.close) && last.close > 0) {
+          setLiveMark({ pair: markPair, price: last.close })
+        }
+      },
+    )
+
+    const unsubscribe = subscribeToMarketGatewayStream(
+      markPair,
+      '5m',
+      2,
+      (ev) => {
+        if (!active) return
+        if (ev.type === 'snapshot' && ev.candles.length > 0) {
+          const last = ev.candles[ev.candles.length - 1]
+          if (last && Number.isFinite(last.close) && last.close > 0) {
+            setLiveMark({ pair: markPair, price: last.close })
+          }
+        } else if (
+          ev.type === 'candle' &&
+          Number.isFinite(ev.candle.close) &&
+          ev.candle.close > 0
+        ) {
+          setLiveMark({ pair: markPair, price: ev.candle.close })
+        }
+      },
+      () => {
+        // Keep last real price or null; never fabricate
+      },
+    )
+
+    return () => {
+      active = false
+      controller.abort()
+      unsubscribe()
     }
-  }
+  }, [markPair])
 
-  async function handleStop() {
-    setBusyAction('stop')
-    try {
-      const next = await stopBotOnServer()
-      setSnapshot(next)
-      onChangeStatus('stopped')
-    } finally {
-      setBusyAction(null)
-    }
-  }
+  const effectiveMarkPrice =
+    liveMark && markPair && liveMark.pair === markPair ? liveMark.price : null
 
-  async function handleTickNow() {
-    setBusyAction('tick')
-    try {
-      const next = await triggerImmediateBotTick()
-      setSnapshot(next)
-    } finally {
-      setBusyAction(null)
-    }
-  }
-
-  async function handleReset() {
-    setBusyAction('reset')
-    setConfirmResetOpen(false)
-    try {
-      const next = await resetBotOnServer()
-      setSnapshot(next)
-      onChangeStatus('stopped')
-    } finally {
-      setBusyAction(null)
-    }
-  }
-
-  async function handleSelectPreset(presetId: string) {
-    setBusyAction('preset')
-    try {
-      const next = await selectBotPresetOnServer({ presetId })
-      setSnapshot(next)
-    } finally {
-      setBusyAction(null)
-    }
-  }
-
-  async function handleSyncCustomStrategy() {
-    setBusyAction('sync')
-    try {
-      const next = await selectBotPresetOnServer({ strategy })
-      setSnapshot(next)
-    } finally {
-      setBusyAction(null)
-    }
-  }
-
-  async function handleRunAccuracyAudit() {
-    setBusyAction('audit')
-    try {
-      const result = await fetchBotAccuracyAudit(true)
-      setAuditReport(result)
-    } finally {
-      setBusyAction(null)
-    }
-  }
-
-  async function handleDemoOrder(side: 'BUY' | 'SELL', notionalUsd: number) {
-    setBusyAction('exchange-order')
-    setExchangeFeedback(null)
-    try {
-      const res = await submitDemoOrderOnServer({
-        pair: activePreset.strategy.pair,
-        side,
-        notionalUsd,
-      })
-      setSnapshot(res.bot)
-      if (res.ok) {
-        setExchangeFeedback({
-          tone: 'pos',
-          message: isEs
-            ? `Orden ${side} ${activePreset.strategy.pair} por $${notionalUsd.toFixed(2)} USD ejecutada @ $${res.order.price.toFixed(2)} (${res.order.quantity} unidades).`
-            : `Order ${side} ${activePreset.strategy.pair} for $${notionalUsd.toFixed(2)} USD filled @ $${res.order.price.toFixed(2)} (${res.order.quantity} units).`,
-        })
-      } else {
-        setExchangeFeedback({
+  const runServerAction = useCallback(
+    async <T,>(
+      actionKey: string,
+      fn: () => Promise<T>,
+      onSuccess?: (result: T) => void,
+    ): Promise<boolean> => {
+      setBusyAction(actionKey)
+      setFeedback(null)
+      try {
+        const result = await fn()
+        onSuccess?.(result)
+        await refreshAllSqlViews(true)
+        return true
+      } catch (err) {
+        setFeedback({
           tone: 'neg',
-          message:
-            res.error ??
-            (isEs
-              ? 'Orden rechazada por Límites Duros.'
-              : 'Order rejected by Hard Risk Limits.'),
+          message: err instanceof Error ? err.message : String(err),
         })
+        return false
+      } finally {
+        setBusyAction(null)
       }
-    } finally {
-      setBusyAction(null)
-    }
-  }
+    },
+    [refreshAllSqlViews],
+  )
 
-  async function handleToggleKillSwitch() {
-    setBusyAction('kill-switch')
+  const handleRetryConnection = useCallback(() => {
+    setFeedback(null)
+    setInitialLoaded(false)
+    setStreamStatus('connecting')
+    setRetryNonce((n) => n + 1)
+  }, [])
+
+  const handleStart = useCallback(() => {
+    if (!snapshot) return
+    void runServerAction(
+      'start',
+      () => startBotOnServer({ presetId: snapshot.preset.id }),
+      (next) => {
+        setSnapshot(next)
+        onChangeStatus(deriveBotStatus(next))
+      },
+    )
+  }, [snapshot, runServerAction, onChangeStatus])
+
+  const handlePause = useCallback(() => {
+    void runServerAction('pause', () => pauseBotOnServer(), (next) => {
+      setSnapshot(next)
+      onChangeStatus(deriveBotStatus(next))
+    })
+  }, [runServerAction, onChangeStatus])
+
+  const handleResume = useCallback(() => {
+    void runServerAction('resume', () => resumeBotOnServer(), (next) => {
+      setSnapshot(next)
+      onChangeStatus(deriveBotStatus(next))
+    })
+  }, [runServerAction, onChangeStatus])
+
+  const handleStop = useCallback(() => {
+    void runServerAction('stop', () => stopBotOnServer(), (next) => {
+      setSnapshot(next)
+      onChangeStatus(deriveBotStatus(next))
+    })
+  }, [runServerAction, onChangeStatus])
+
+  const handleTickNow = useCallback(() => {
+    void runServerAction('tick', () => triggerImmediateBotTick(), (next) => {
+      setSnapshot(next)
+    })
+  }, [runServerAction])
+
+  const handleToggleKillSwitch = useCallback(() => {
     setConfirmKillOpen(false)
-    setExchangeFeedback(null)
-    try {
-      const action = killSwitchActive ? 'reset' : 'engage'
-      const next = await toggleExchangeKillSwitchOnServer({
-        action,
-        reason: isEs
-          ? 'Parada de emergencia activada desde el panel de control'
-          : 'Emergency stop triggered from control panel',
-      })
-      setSnapshot(next)
-      if (action === 'engage') {
-        onChangeStatus('stopped')
-        setExchangeFeedback({
-          tone: 'neg',
-          message: isEs
-            ? 'Kill-Switch activado: el bot fue detenido, posiciones abiertas liquidadas y nuevas órdenes bloqueadas.'
-            : 'Kill-Switch engaged: bot halted, open positions flattened, and new orders blocked.',
+    const killSwitchActive = Boolean(snapshot?.exchange?.killSwitchActive)
+    const action = killSwitchActive ? 'reset' : 'engage'
+    void runServerAction(
+      'kill-switch',
+      () =>
+        toggleExchangeKillSwitchOnServer({
+          action,
+          reason: t('botRun.killSwitchTriggerReason'),
+        }),
+      (next) => {
+        setSnapshot(next)
+        onChangeStatus(deriveBotStatus(next))
+        setFeedback({
+          tone: action === 'engage' ? 'neg' : 'pos',
+          message:
+            action === 'engage'
+              ? t('botRun.killSwitchEngagedFeedback')
+              : t('botRun.killSwitchRearmedFeedback'),
         })
-      } else {
-        setExchangeFeedback({
-          tone: 'pos',
-          message: isEs
-            ? 'Kill-Switch rearmado: el adaptador de exchange vuelve a estar operativo.'
-            : 'Kill-Switch rearmed: the exchange adapter is operational again.',
-        })
-      }
-    } finally {
-      setBusyAction(null)
-    }
-  }
+      },
+    )
+  }, [snapshot, t, runServerAction, onChangeStatus])
 
-  async function handleChangeMaxOrderNotional(maxOrderNotionalUsd: number) {
-    setBusyAction('limits')
-    try {
-      const next = await updateHardLimitsOnServer({ maxOrderNotionalUsd })
+  const handleFundPaper = useCallback(
+    async (amountUsd: number) => {
+      await runServerAction(
+        'paper-fund',
+        () => fundPaperAccountOnServer(amountUsd),
+        (next) => {
+          setSnapshot(next)
+          setFeedback({
+            tone: 'pos',
+            message: t('botRun.acctFundedFeedback', {
+              amount: amountUsd.toFixed(2),
+            }),
+          })
+        },
+      )
+    },
+    [t, runServerAction],
+  )
+
+  const handleResetSession = useCallback(async () => {
+    await runServerAction('reset', () => resetBotOnServer(), (next) => {
       setSnapshot(next)
-    } finally {
-      setBusyAction(null)
-    }
-  }
+      onChangeStatus(deriveBotStatus(next))
+    })
+  }, [runServerAction, onChangeStatus])
 
-  async function handleToggleAutoMirror(checked: boolean) {
-    setBusyAction('limits')
-    try {
-      const next = await updateHardLimitsOnServer({
-        autoMirrorBotOrders: checked,
-      })
-      setSnapshot(next)
-    } finally {
-      setBusyAction(null)
-    }
-  }
-
-  async function handleResetVault() {
-    setBusyAction('exchange-reset')
-    setExchangeFeedback(null)
-    try {
-      const next = await resetExchangeVaultOnServer()
-      setSnapshot(next)
-    } finally {
-      setBusyAction(null)
-    }
-  }
-
-  async function handleSimulateMt5Ping() {
-    setBusyAction('mt5-ping')
-    try {
-      const res = await simulateMt5PingOnServer()
-      setLastMt5Packet(res.packet)
+  const handleClosePosition = useCallback(async () => {
+    await runServerAction('close-pos', () => closePositionOnServer(), (res) => {
       setSnapshot(res.bot)
-    } finally {
-      setBusyAction(null)
-    }
-  }
+      setFeedback({
+        tone: 'pos',
+        message: t('botRun.posClosedFeedback', {
+          paper: String(res.paperClosed),
+          testnet: String(res.testnetClosed),
+          mt5: String(res.mt5Pending),
+        }),
+      })
+    })
+  }, [t, runServerAction])
 
-  function handleSendToStats() {
+  const handleSubmitOrder = useCallback(
+    async (params: {
+      pair: string
+      side: 'BUY' | 'SELL'
+      notionalUsd: number
+      clientOrderId: string
+    }): Promise<boolean> => {
+      return runServerAction(
+        'manual-order',
+        () => submitExchangeOrderOnServer(params),
+        (res) => {
+          setSnapshot(res.bot)
+          setFeedback({
+            tone: res.ok ? 'pos' : 'neg',
+            message: res.ok
+              ? t('botRun.orderSubmittedFeedback', {
+                  id: res.order.id,
+                  status: res.order.status,
+                  dedup: res.deduplicated ? t('botRun.orderDedupSuffix') : '',
+                })
+              : (res.error ?? t('botRun.orderRejectedFeedback')),
+          })
+        },
+      )
+    },
+    [t, runServerAction],
+  )
+
+  const handleCancelOrder = useCallback(
+    async (orderId: string) => {
+      await runServerAction(
+        `cancel-${orderId}`,
+        () => cancelExchangeOrderOnServer(orderId),
+        (res) => {
+          setSnapshot(res.bot)
+          setFeedback({
+            tone: 'pos',
+            message: t('botRun.orderCanceledFeedback', { id: orderId }),
+          })
+        },
+      )
+    },
+    [t, runServerAction],
+  )
+
+  const handleSaveHardLimits = useCallback(
+    async (
+      limits: Partial<HardRiskLimits> & { autoMirrorBotOrders?: boolean },
+    ) => {
+      await runServerAction(
+        'limits',
+        () => updateHardLimitsOnServer(limits),
+        (next) => {
+          setSnapshot(next)
+          setFeedback({
+            tone: 'pos',
+            message: t('botRun.riskSavedFeedback'),
+          })
+        },
+      )
+    },
+    [t, runServerAction],
+  )
+
+  const handleSelectPreset = useCallback(
+    async (presetId: string) => {
+      await runServerAction(
+        'preset',
+        () => selectBotPresetOnServer({ presetId }),
+        (next) => setSnapshot(next),
+      )
+    },
+    [runServerAction],
+  )
+
+  const handleSaveStrategyParams = useCallback(
+    async (params: { strategy: Strategy; timeframe: Interval }) => {
+      await runServerAction(
+        'strategy-params',
+        () => selectBotPresetOnServer(params),
+        (next) => {
+          setSnapshot(next)
+          setFeedback({
+            tone: 'pos',
+            message: t('botRun.strategySavedFeedback'),
+          })
+        },
+      )
+    },
+    [t, runServerAction],
+  )
+
+  const handleApplyBotSetup = useCallback(async () => {
+    await runServerAction(
+      'sync',
+      () => selectBotPresetOnServer({ strategy }),
+      (next) => {
+        setSnapshot(next)
+        setFeedback({
+          tone: 'pos',
+          message: t('botRun.setupAppliedFeedback'),
+        })
+      },
+    )
+  }, [strategy, t, runServerAction])
+
+  const handleSendToStats = useCallback(() => {
     if (!snapshot || !onSaveSnapshot) return
     const btSnapshot = buildBacktestSnapshotFromBot(snapshot)
     onSaveSnapshot(btSnapshot)
     onNavigate?.('stats')
-  }
+  }, [snapshot, onSaveSnapshot, onNavigate])
 
-  const connLabel =
-    snapshot?.connectionMode === 'sse-live'
-      ? 'SSE REALTIME STREAM'
-      : snapshot?.connectionMode === 'http-server'
-        ? 'BACKEND HTTP'
-        : 'LOCAL SHADOW'
+  const handleOpenShortcuts = useCallback(() => {
+    setShortcutsOpen(true)
+  }, [])
 
-  return (
-    <div className="flex flex-col gap-4">
-      <PageHeader
-        title={t('botRun.title')}
-        badge={connLabel}
-        actions={
-          onNavigate && (
-            <>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => onNavigate('bot-config')}
-              >
-                <SlidersHorizontal className="size-3.5" />
-                <span>{t('botRun.editParams')}</span>
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => onNavigate('backtest')}
-              >
-                <FlaskConical className="size-3.5" />
-                <span>{t('botRun.runBacktest')}</span>
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => onNavigate('stats')}
-              >
-                <BarChart3 className="size-3.5" />
-                <span>{t('botRun.viewStats')}</span>
-              </Button>
-            </>
-          )
+  // Keyboard shortcuts: P (pause/resume), C (close position w/ confirm), / (log search), ? (cheat sheet)
+  useEffect(() => {
+    if (!snapshot) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey || e.altKey) return
+      if (isEditableTarget(e.target)) return
+
+      const key = e.key
+      if (key === '?') {
+        e.preventDefault()
+        setShortcutsOpen((prev) => !prev)
+        return
+      }
+      if (confirmKillOpen || confirmCloseOpen || shortcutsOpen) return
+
+      if (key === '/') {
+        e.preventDefault()
+        ensureSectionOpen('events')
+        requestAnimationFrame(() => {
+          const el = document.getElementById('botrun-event-search')
+          if (el instanceof HTMLInputElement) {
+            el.focus()
+            el.select()
+          }
+        })
+        return
+      }
+
+      if (key === 'p' || key === 'P') {
+        if (busyAction !== null) return
+        if (snapshot.running) {
+          e.preventDefault()
+          handlePause()
+        } else if (snapshot.paused && !snapshot.exchange?.killSwitchActive) {
+          e.preventDefault()
+          handleResume()
         }
-      />
+        return
+      }
 
-      {/* Engine Status & Direct Command Strip */}
-      <Card>
-        <CardContent className="flex flex-wrap items-center justify-between gap-4 p-4">
-          <div className="flex flex-wrap items-center gap-3">
-            <span
-              className={cn(
-                'size-2.5 shrink-0 rounded-full',
-                killSwitchActive
-                  ? 'bg-[var(--negative)]'
-                  : isRunning
-                    ? 'bg-[var(--positive)] shadow-[0_0_0_3px_var(--positive-soft)]'
-                    : 'bg-muted-foreground/50',
-              )}
-              aria-hidden="true"
-            />
-            <div className="flex flex-col">
-              <span className="font-mono text-[10px] font-semibold uppercase tracking-[0.07em] text-muted-foreground">
-                {t('botRun.currentStatus')}
-              </span>
-              <strong className="font-mono text-sm font-bold text-foreground">
-                {t(isRunning ? 'status.running' : 'status.stopped')}
+      if (key === 'c' || key === 'C') {
+        const hasOpen = Boolean(
+          snapshot.state.openPosition || snapshot.exchange?.botOwnedPosition,
+        )
+        if (hasOpen && busyAction === null) {
+          e.preventDefault()
+          ensureSectionOpen('positions')
+          setConfirmCloseOpen(true)
+        }
+      }
+    }
+
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [
+    snapshot,
+    busyAction,
+    confirmKillOpen,
+    confirmCloseOpen,
+    shortcutsOpen,
+    ensureSectionOpen,
+    handlePause,
+    handleResume,
+  ])
+
+  const pageHeaderActions = onNavigate ? (
+    <>
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        onClick={() => onNavigate('bot-config')}
+      >
+        <SlidersHorizontal className="size-3.5" />
+        <span>{t('botRun.editParams')}</span>
+      </Button>
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        onClick={() => onNavigate('backtest')}
+      >
+        <FlaskConical className="size-3.5" />
+        <span>{t('botRun.runBacktest')}</span>
+      </Button>
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        onClick={() => onNavigate('stats')}
+      >
+        <BarChart3 className="size-3.5" />
+        <span>{t('botRun.viewStats')}</span>
+      </Button>
+    </>
+  ) : undefined
+
+  // Offline / Backend Disconnected Gate — zero fabricated data shown
+  if (!snapshot) {
+    return (
+      <div className="flex flex-col gap-4">
+        <PageHeader title={t('botRun.title')} actions={pageHeaderActions} />
+
+        <Card>
+          <CardContent className="flex flex-col items-start gap-3 p-6">
+            <div className="flex flex-wrap items-center gap-2.5">
+              <WifiOff className="size-5 text-[var(--negative)]" />
+              <strong className="text-sm font-bold text-foreground">
+                {!initialLoaded && streamStatus === 'connecting'
+                  ? t('botRun.connectingTitle')
+                  : t('botRun.offlineTitle')}
               </strong>
+              <Badge variant="negative">{streamStatus.toUpperCase()}</Badge>
             </div>
-
-            {killSwitchActive && (
-              <Badge variant="negative">KILL-SWITCH ACTIVE</Badge>
-            )}
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
+            <p className="max-w-2xl text-xs text-muted-foreground">
+              {t('botRun.offlineDesc')}
+            </p>
             <Button
               type="button"
               variant="default"
               size="sm"
-              disabled={isRunning || killSwitchActive || busyAction !== null}
-              onClick={handleStart}
+              onClick={handleRetryConnection}
             >
-              <Play className="size-3.5 fill-current" />
-              <span>{t('botRun.start')}</span>
+              <RefreshCw className="size-3.5" />
+              <span>{t('botRun.retryConn')}</span>
             </Button>
-
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={!isRunning || busyAction !== null}
-              onClick={handleStop}
-            >
-              <Square className="size-3.5 fill-current" />
-              <span>{t('botRun.stop')}</span>
-            </Button>
-
-            <Button
-              type="button"
-              variant="secondary"
-              size="sm"
-              disabled={killSwitchActive || busyAction !== null}
-              onClick={handleTickNow}
-            >
-              <Zap className="size-3.5 text-primary" />
-              <span>
-                {isEs ? 'Evaluar Vela Ahora' : 'Evaluate Bar Now'}
-              </span>
-            </Button>
-
-            <AlertDialog
-              open={confirmResetOpen}
-              onOpenChange={setConfirmResetOpen}
-            >
-              <AlertDialogTrigger asChild>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  disabled={busyAction !== null}
-                >
-                  <RotateCcw className="size-3.5" />
-                  <span>{isEs ? 'Reiniciar Cuenta' : 'Reset Account'}</span>
-                </Button>
-              </AlertDialogTrigger>
-              <AlertDialogContent>
-                <AlertDialogHeader>
-                  <AlertDialogTitle>
-                    {isEs ? 'Reiniciar cuenta del bot' : 'Reset bot account'}
-                  </AlertDialogTitle>
-                  <AlertDialogDescription>
-                    {isEs
-                      ? 'Se limpiarán las operaciones cerradas, tickets y bitácora de esta sesión y el motor volverá a STOP.'
-                      : 'Closed trades, tickets, and session logs will be cleared and the engine will reset to STOP.'}
-                  </AlertDialogDescription>
-                </AlertDialogHeader>
-                <AlertDialogFooter>
-                  <AlertDialogCancel>
-                    {isEs ? 'Cancelar' : 'Cancel'}
-                  </AlertDialogCancel>
-                  <AlertDialogAction onClick={handleReset}>
-                    {isEs ? 'Confirmar reinicio' : 'Confirm reset'}
-                  </AlertDialogAction>
-                </AlertDialogFooter>
-              </AlertDialogContent>
-            </AlertDialog>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Active Strategy & Preset Selector */}
-      <Card>
-        <CardHeader>
-          <div className="flex flex-col gap-0.5">
-            <CardTitle>{isEs ? 'Estrategia Activa' : 'Active Strategy'}</CardTitle>
-            <CardDescription>{activePreset.description}</CardDescription>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
-            <Select
-              value={activePreset.id}
-              disabled={busyAction !== null}
-              onValueChange={handleSelectPreset}
-            >
-              <SelectTrigger
-                className="w-[260px]"
-                aria-label={
-                  isEs ? 'Seleccionar preset del bot' : 'Select bot preset'
-                }
-              >
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {presets.map((p) => (
-                  <SelectItem key={p.id} value={p.id}>
-                    [{p.domain === 'prediction-market' ? 'PRED' : 'SPOT'} ·{' '}
-                    {p.timeframe}] {p.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={busyAction !== null}
-              onClick={handleSyncCustomStrategy}
-            >
-              {isEs
-                ? 'Aplicar mis ajustes de Bot Setup'
-                : 'Apply My Bot Setup Params'}
-            </Button>
-          </div>
-        </CardHeader>
-
-        <CardContent className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-          <div className="flex flex-col gap-0.5">
-            <span className="font-mono text-[10px] uppercase tracking-[0.06em] text-muted-foreground">
-              {t('botRun.pair')}
-            </span>
-            <strong className="font-mono text-xs font-semibold text-foreground">
-              {activePreset.strategy.pair} · {activePreset.timeframe}
-            </strong>
-          </div>
-          <div className="flex flex-col gap-0.5">
-            <span className="font-mono text-[10px] uppercase tracking-[0.06em] text-muted-foreground">
-              {isEs ? 'Dominio / Motor' : 'Domain / Engine'}
-            </span>
-            <strong className="truncate font-mono text-xs font-semibold text-foreground">
-              {activePreset.domain === 'prediction-market'
-                ? isEs
-                  ? 'Predicción Binaria (Wilson 95%)'
-                  : 'Binary Prediction (Wilson 95%)'
-                : `${activePreset.filters?.signalEngine ?? 'momentum-structure'}${activePreset.filters?.breakevenAtOneR ? ' + Profit-Lock' : ''}`}
-            </strong>
-          </div>
-          <div className="flex flex-col gap-0.5">
-            <span className="font-mono text-[10px] uppercase tracking-[0.06em] text-muted-foreground">
-              {t('botRun.positionSize')}
-            </span>
-            <strong className="font-mono text-xs font-semibold text-foreground tabular-nums">
-              {activePreset.strategy.positionSize}%
-            </strong>
-          </div>
-          <div className="flex flex-col gap-0.5">
-            <span className="font-mono text-[10px] uppercase tracking-[0.06em] text-muted-foreground">
-              {t('botRun.stopLoss')}
-            </span>
-            <strong className="font-mono text-xs font-semibold text-[var(--negative)] tabular-nums">
-              {activePreset.strategy.stopLoss}%
-            </strong>
-          </div>
-          <div className="flex flex-col gap-0.5">
-            <span className="font-mono text-[10px] uppercase tracking-[0.06em] text-muted-foreground">
-              {t('botRun.takeProfit')}
-            </span>
-            <strong className="font-mono text-xs font-semibold text-[var(--positive)] tabular-nums">
-              {activePreset.strategy.takeProfit}%
-            </strong>
-          </div>
-          <div className="flex flex-col gap-0.5">
-            <span className="font-mono text-[10px] uppercase tracking-[0.06em] text-muted-foreground">
-              {t('botRun.maxDailyRisk')}
-            </span>
-            <strong className="font-mono text-xs font-semibold text-foreground tabular-nums">
-              {activePreset.strategy.maxDailyRisk}%
-            </strong>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Account Equity & Server Telemetry */}
-      <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-        <Card>
-          <CardHeader>
-            <CardTitle>{isEs ? 'Cuenta y Balance' : 'Account Equity'}</CardTitle>
-            <Badge
-              variant={engineState?.dayHalted ? 'negative' : 'positive'}
-            >
-              {engineState?.dayHalted ? 'HALTED' : 'CIRCUIT OK'}
-            </Badge>
-          </CardHeader>
-          <CardContent className="flex flex-col gap-3">
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-              <div className="flex flex-col gap-0.5">
-                <span className="font-mono text-[10px] uppercase text-muted-foreground">
-                  {isEs ? 'Equidad Total' : 'Total Equity'}
-                </span>
-                <strong className="font-mono text-sm font-bold tabular-nums">
-                  ${totalEquity.toFixed(2)}
-                </strong>
-              </div>
-              <div className="flex flex-col gap-0.5">
-                <span className="font-mono text-[10px] uppercase text-muted-foreground">
-                  {isEs ? 'PnL Neto' : 'Net PnL'}
-                </span>
-                <strong
-                  className={cn(
-                    'font-mono text-sm font-bold tabular-nums',
-                    netPnl > 0
-                      ? 'text-[var(--positive)]'
-                      : netPnl < 0
-                        ? 'text-[var(--negative)]'
-                        : 'text-foreground',
-                  )}
-                >
-                  {netPnl >= 0 ? '+' : ''}${netPnl.toFixed(2)} (
-                  {netPnlPct >= 0 ? '+' : ''}
-                  {netPnlPct.toFixed(2)}%)
-                </strong>
-              </div>
-              <div className="flex flex-col gap-0.5">
-                <span className="font-mono text-[10px] uppercase text-muted-foreground">
-                  {activePreset.domain === 'prediction-market'
-                    ? isEs
-                      ? 'Tickets'
-                      : 'Tickets'
-                    : isEs
-                      ? 'Posición / Cerradas'
-                      : 'Open / Closed'}
-                </span>
-                <strong className="font-mono text-xs font-semibold tabular-nums">
-                  {activePreset.domain === 'prediction-market'
-                    ? `${engineState?.activeTickets.length ?? 0} / ${resolvedTickets.length}`
-                    : `${engineState?.openPosition ? engineState.openPosition.side.toUpperCase() : 'NONE'} / ${closedTrades.length}`}
-                </strong>
-              </div>
-              <div className="flex flex-col gap-0.5">
-                <span className="font-mono text-[10px] uppercase text-muted-foreground">
-                  {isEs ? 'Freno Diario' : 'Breaker'}
-                </span>
-                <strong className="font-mono text-xs font-semibold">
-                  {engineState?.dayHalted ? 'HALTED' : 'OK'}
-                </strong>
-              </div>
-            </div>
-
-            {engineState?.openPosition && (
-              <div className="flex flex-wrap items-center justify-between gap-2 rounded-sm border border-primary/35 bg-primary/10 px-3 py-2 font-mono text-xs">
-                <strong className="text-foreground">
-                  {isEs ? 'Posición Activa:' : 'Active Position:'}{' '}
-                  {engineState.openPosition.side.toUpperCase()}{' '}
-                  {engineState.openPosition.pair}
-                </strong>
-                <span className="text-muted-foreground tabular-nums">
-                  Entry: ${engineState.openPosition.entryPrice.toFixed(2)} · SL: $
-                  {engineState.openPosition.stopPrice.toFixed(2)}
-                  {engineState.openPosition.breakevenArmed && (
-                    <Badge variant="default" className="mx-1.5">
-                      <Lock className="size-2.5" /> Profit-Lock
-                    </Badge>
-                  )}{' '}
-                  · TP: ${engineState.openPosition.targetPrice.toFixed(2)}
-                </span>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>
-              {isEs ? 'Telemetría del Servidor' : 'Server Telemetry'}
-            </CardTitle>
-            <Badge variant="secondary">
-              {telemetry?.cache.lastSource?.toUpperCase() ?? 'BINANCE'}
-            </Badge>
-          </CardHeader>
-          <CardContent className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-            <div className="flex flex-col gap-0.5">
-              <span className="font-mono text-[10px] uppercase text-muted-foreground">
-                {isEs ? 'Latencia Media API' : 'Avg API Latency'}
-              </span>
-              <strong className="font-mono text-xs font-semibold tabular-nums">
-                {telemetry?.cache.avgLatencyMs ?? 0} ms
-              </strong>
-            </div>
-            <div className="flex flex-col gap-0.5">
-              <span className="font-mono text-[10px] uppercase text-muted-foreground">
-                {isEs ? 'Hit-Rate Caché TTL' : 'TTL Cache Hit-Rate'}
-              </span>
-              <strong className="font-mono text-xs font-semibold tabular-nums">
-                {telemetry?.cache.hitRatePct ?? 0}% ({telemetry?.cache.hits ?? 0} hits)
-              </strong>
-            </div>
-            <div className="flex flex-col gap-0.5">
-              <span className="font-mono text-[10px] uppercase text-muted-foreground">
-                {isEs ? 'Ciclos Ejecutados' : 'Executed Ticks'}
-              </span>
-              <strong className="font-mono text-xs font-semibold tabular-nums">
-                {telemetry?.tickCount ?? 0} · SSE:{' '}
-                {telemetry?.connectedStreamClients ?? 1}
-              </strong>
-            </div>
           </CardContent>
         </Card>
       </div>
+    )
+  }
 
-      {/* Demo Broker & Risk Guardian */}
-      <Card>
-        <CardHeader>
-          <CardTitle>
-            {isEs
-              ? 'Broker Demo y Guardián de Riesgo'
-              : 'Demo Broker & Risk Guard'}
-          </CardTitle>
+  return (
+    <div className="flex flex-col gap-4">
+      <PageHeader title={t('botRun.title')} actions={pageHeaderActions} />
 
-          <div className="flex flex-wrap items-center gap-3">
-            <label className="flex cursor-pointer items-center gap-2 font-mono text-xs text-muted-foreground">
-              <Switch
-                checked={exchange?.autoMirrorBotOrders !== false}
-                disabled={busyAction !== null}
-                onCheckedChange={handleToggleAutoMirror}
-              />
-              <span>{isEs ? 'Espejo Auto' : 'Auto-Mirror'}</span>
-            </label>
+      {/* Sticky 1-row Operator Command Bar */}
+      <CommandBar
+        snapshot={snapshot}
+        account={account}
+        streamStatus={streamStatus}
+        busyAction={busyAction}
+        confirmKillOpen={confirmKillOpen}
+        onConfirmKillOpenChange={setConfirmKillOpen}
+        onOpenShortcuts={handleOpenShortcuts}
+        onStart={handleStart}
+        onPause={handlePause}
+        onResume={handleResume}
+        onStop={handleStop}
+        onTickNow={handleTickNow}
+        onToggleKillSwitch={handleToggleKillSwitch}
+      />
 
-            <Button
-              type="button"
-              variant="outline"
-              size="xs"
-              disabled={busyAction !== null}
-              onClick={handleResetVault}
-            >
-              {isEs ? 'Restaurar Bóveda Demo' : 'Reset Demo Vault'}
-            </Button>
-
-            {killSwitchActive ? (
-              <Button
-                type="button"
-                variant="positive"
-                size="xs"
-                disabled={busyAction !== null}
-                onClick={handleToggleKillSwitch}
-              >
-                <CheckCircle2 className="size-3.5" />
-                <span>
-                  {isEs
-                    ? 'Rearmar Sistema (Desbloquear Kill-Switch)'
-                    : 'Rearm System (Unlock Kill-Switch)'}
-                </span>
-              </Button>
+      {/* Action Feedback Banner */}
+      {feedback && (
+        <div
+          role={feedback.tone === 'neg' ? 'alert' : 'status'}
+          className={cn(
+            'flex items-center justify-between gap-2 rounded-sm px-3 py-2 text-xs',
+            feedback.tone === 'pos'
+              ? 'bg-[var(--positive-soft)] text-[var(--positive)]'
+              : 'bg-[var(--negative-soft)] text-[var(--negative)]',
+          )}
+        >
+          <span className="flex items-center gap-2">
+            {feedback.tone === 'pos' ? (
+              <CheckCircle2 className="size-4 shrink-0" />
             ) : (
-              <AlertDialog
-                open={confirmKillOpen}
-                onOpenChange={setConfirmKillOpen}
-              >
-                <AlertDialogTrigger asChild>
-                  <Button
-                    type="button"
-                    variant="destructive"
-                    size="xs"
-                    disabled={busyAction !== null}
-                  >
-                    <ShieldAlert className="size-3.5" />
-                    <span>
-                      {isEs
-                        ? 'Botón de Emergencia (Kill-Switch)'
-                        : 'Emergency Stop (Kill-Switch)'}
-                    </span>
-                  </Button>
-                </AlertDialogTrigger>
-                <AlertDialogContent>
-                  <AlertDialogHeader>
-                    <AlertDialogTitle className="flex items-center gap-2 text-[var(--negative)]">
-                      <ShieldAlert className="size-4" />
-                      <span>
-                        {isEs
-                          ? 'Activar Parada de Emergencia (Kill-Switch)'
-                          : 'Engage Emergency Kill-Switch'}
-                      </span>
-                    </AlertDialogTitle>
-                    <AlertDialogDescription>
-                      {isEs
-                        ? 'Detendrá el bot de inmediato, cerrará posiciones abiertas en la bóveda y bloqueará todas las nuevas órdenes hasta que lo rearmes.'
-                        : 'This immediately stops the bot, flattens open vault positions, and blocks all new orders until manually rearmed.'}
-                    </AlertDialogDescription>
-                  </AlertDialogHeader>
-                  <AlertDialogFooter>
-                    <AlertDialogCancel>
-                      {isEs ? 'Cancelar' : 'Cancel'}
-                    </AlertDialogCancel>
-                    <AlertDialogAction onClick={handleToggleKillSwitch}>
-                      {isEs ? 'Activar Kill-Switch' : 'Engage Kill-Switch'}
-                    </AlertDialogAction>
-                  </AlertDialogFooter>
-                </AlertDialogContent>
-              </AlertDialog>
+              <ShieldAlert className="size-4 shrink-0" />
             )}
-          </div>
-        </CardHeader>
-
-        <CardContent className="flex flex-col gap-4">
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-            <div className="flex flex-col gap-0.5">
-              <span className="font-mono text-[10px] uppercase text-muted-foreground">
-                {isEs ? 'Modo Adaptador' : 'Adapter Mode'}
-              </span>
-              <strong className="font-mono text-xs font-semibold">
-                {exchange?.mode === 'binance-testnet'
-                  ? 'BINANCE TESTNET'
-                  : 'DEMO VAULT LOCAL'}
-              </strong>
-            </div>
-            <div className="flex flex-col gap-0.5">
-              <span className="font-mono text-[10px] uppercase text-muted-foreground">
-                {isEs ? 'Kill-Switch' : 'Kill-Switch'}
-              </span>
-              <strong
-                className={cn(
-                  'font-mono text-xs font-semibold',
-                  killSwitchActive
-                    ? 'text-[var(--negative)]'
-                    : 'text-[var(--positive)]',
-                )}
-              >
-                {killSwitchActive
-                  ? isEs
-                    ? 'BLOQUEO ACTIVO'
-                    : 'EMERGENCY LOCK'
-                  : isEs
-                    ? 'ARMADO / SEGURO'
-                    : 'ARMED / SAFE'}
-              </strong>
-            </div>
-            <div className="flex flex-col gap-0.5">
-              <span className="font-mono text-[10px] uppercase text-muted-foreground">
-                {isEs ? 'Límite Duro / Orden' : 'Hard Cap / Order'}
-              </span>
-              <strong className="font-mono text-xs font-semibold tabular-nums">
-                ${exchange?.hardLimits.maxOrderNotionalUsd ?? 500} USD
-              </strong>
-            </div>
-            <div className="flex flex-col gap-0.5">
-              <span className="font-mono text-[10px] uppercase text-muted-foreground">
-                {isEs ? 'Órdenes Hoy' : 'Orders Today'}
-              </span>
-              <strong className="font-mono text-xs font-semibold tabular-nums">
-                {exchange?.dailyOrderCount ?? 0} /{' '}
-                {exchange?.hardLimits.maxDailyOrders ?? 12}
-              </strong>
-            </div>
-            <div className="flex flex-col gap-0.5">
-              <span className="font-mono text-[10px] uppercase text-muted-foreground">
-                {isEs ? 'Pérdida Diaria Acum.' : 'Daily Realized Loss'}
-              </span>
-              <strong className="font-mono text-xs font-semibold tabular-nums">
-                ${(exchange?.dailyRealizedLossUsd ?? 0).toFixed(2)} / $
-                {exchange?.hardLimits.maxDailyLossUsd ?? 250}
-              </strong>
-            </div>
-            <div className="flex flex-col gap-0.5">
-              <span className="font-mono text-[10px] uppercase text-muted-foreground">
-                {isEs ? 'Saldos (USDT / BTC)' : 'Balances (USDT / BTC)'}
-              </span>
-              <strong className="font-mono text-xs font-semibold tabular-nums">
-                $
-                {(
-                  exchange?.balances.find((b) => b.asset === 'USDT')?.free ??
-                  10000
-                ).toFixed(0)}{' '}
-                ·{' '}
-                {(
-                  exchange?.balances.find((b) => b.asset === 'BTC')?.free ?? 0.05
-                ).toFixed(4)}{' '}
-                BTC
-              </strong>
-            </div>
-          </div>
-
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border bg-secondary/40 p-3">
-            <div className="flex flex-wrap items-center gap-2">
-              <Button
-                type="button"
-                variant="positive"
-                size="xs"
-                disabled={busyAction !== null}
-                onClick={() => handleDemoOrder('BUY', 150)}
-              >
-                {isEs
-                  ? `Comprar $150 (${activePreset.strategy.pair})`
-                  : `Buy $150 (${activePreset.strategy.pair})`}
-              </Button>
-              <Button
-                type="button"
-                variant="destructive"
-                size="xs"
-                disabled={busyAction !== null}
-                onClick={() => handleDemoOrder('SELL', 150)}
-              >
-                {isEs
-                  ? `Vender $150 (${activePreset.strategy.pair})`
-                  : `Sell $150 (${activePreset.strategy.pair})`}
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                size="xs"
-                disabled={busyAction !== null}
-                onClick={() => handleDemoOrder('BUY', 950)}
-              >
-                {isEs
-                  ? 'Probar Rechazo ($950 > Tope)'
-                  : 'Test Rejection ($950 > Cap)'}
-              </Button>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <span className="font-mono text-[10.5px] uppercase text-muted-foreground">
-                {isEs ? 'Tope / Orden:' : 'Hard Cap:'}
-              </span>
-              <div
-                className="inline-flex h-7 items-center gap-0.5 rounded-sm border border-border bg-card p-0.5"
-                role="group"
-              >
-                {[250, 500, 1000].map((cap) => (
-                  <button
-                    key={cap}
-                    type="button"
-                    disabled={busyAction !== null}
-                    onClick={() => handleChangeMaxOrderNotional(cap)}
-                    className={cn(
-                      'inline-flex h-[22px] items-center rounded-[4px] border px-2 font-mono text-[11px] font-medium transition-all duration-150 cursor-pointer disabled:opacity-40',
-                      (exchange?.hardLimits.maxOrderNotionalUsd ?? 500) === cap
-                        ? 'border-border bg-secondary font-semibold text-primary shadow-[0_1px_2px_rgba(0,0,0,0.18)]'
-                        : 'border-transparent text-muted-foreground hover:text-foreground',
-                    )}
-                  >
-                    ${cap} USD
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-
-          {exchangeFeedback && (
-            <div
-              className={cn(
-                'flex items-center gap-2 rounded-sm border px-3 py-2 font-mono text-xs',
-                exchangeFeedback.tone === 'pos'
-                  ? 'border-[var(--positive)]/40 bg-[var(--positive-soft)] text-[var(--positive)]'
-                  : 'border-[var(--negative)]/40 bg-[var(--negative-soft)] text-[var(--negative)]',
-              )}
-            >
-              {exchangeFeedback.tone === 'pos' ? (
-                <CheckCircle2 className="size-4 shrink-0" />
-              ) : (
-                <ShieldAlert className="size-4 shrink-0" />
-              )}
-              <span>{exchangeFeedback.message}</span>
-            </div>
-          )}
-
-          {(exchange?.orders.length ?? 0) > 0 && (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>ID</TableHead>
-                  <TableHead>{isEs ? 'Origen' : 'Source'}</TableHead>
-                  <TableHead>{isEs ? 'Par' : 'Pair'}</TableHead>
-                  <TableHead>{isEs ? 'Lado' : 'Side'}</TableHead>
-                  <TableHead className="text-right">
-                    {isEs ? 'Monto' : 'Notional'}
-                  </TableHead>
-                  <TableHead className="text-right">
-                    {isEs ? 'Precio' : 'Price'}
-                  </TableHead>
-                  <TableHead>{isEs ? 'Estado' : 'Status'}</TableHead>
-                  <TableHead>{isEs ? 'Detalle / Guardián' : 'Detail / Guardian'}</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {(exchange?.orders ?? []).slice(0, 8).map((ord) => (
-                  <TableRow key={ord.id}>
-                    <TableCell className="text-muted-foreground">
-                      {ord.id}
-                    </TableCell>
-                    <TableCell>
-                      {ord.source === 'bot-auto' ? 'BOT AUTO' : 'MANUAL'}
-                    </TableCell>
-                    <TableCell className="font-semibold">{ord.pair}</TableCell>
-                    <TableCell>
-                      <Badge
-                        variant={ord.side === 'BUY' ? 'positive' : 'negative'}
-                      >
-                        {ord.side}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="text-right">
-                      ${ord.notionalUsd.toFixed(2)}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      ${ord.price.toFixed(2)}
-                    </TableCell>
-                    <TableCell>
-                      <Badge
-                        variant={
-                          ord.status === 'FILLED' ? 'positive' : 'negative'
-                        }
-                      >
-                        {ord.status}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {ord.reason ?? '—'}
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* MetaTrader 5 Bridge */}
-      <Card>
-        <CardHeader>
-          <CardTitle>
-            {isEs ? 'Puente MetaTrader 5' : 'MetaTrader 5 Bridge'}
-          </CardTitle>
-          <Button
+            <span>{feedback.message}</span>
+          </span>
+          <button
             type="button"
-            variant="default"
-            size="xs"
-            disabled={busyAction !== null}
-            onClick={handleSimulateMt5Ping}
+            onClick={() => setFeedback(null)}
+            aria-label={t('botRun.dismissNotice')}
+            className="rounded-sm p-0.5 opacity-75 outline-none hover:opacity-100 focus-visible:ring-2 focus-visible:ring-ring cursor-pointer"
           >
-            <Radio className="size-3.5" />
-            <span>
-              {isEs
-                ? 'Simular Poll MT5 (/api/mt5/signal)'
-                : 'Simulate MetaTrader 5 Poll (/api/mt5/signal)'}
-            </span>
-          </Button>
-        </CardHeader>
+            <X className="size-3.5" />
+          </button>
+        </div>
+      )}
 
-        <CardContent className="flex flex-col gap-3">
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-            <div className="flex flex-col gap-0.5">
-              <span className="font-mono text-[10px] uppercase text-muted-foreground">
-                {isEs ? 'Símbolo MT5' : 'MT5 Symbol'}
+      {/* Two-column Operator Layout on wide screens */}
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-12">
+        {/* Left Column: Account, Positions & Manual Ticket, Orders */}
+        <div className="flex min-w-0 flex-col gap-4 xl:col-span-7">
+          <AccountCard
+            snapshot={snapshot}
+            account={account}
+            accountLoading={accountLoading}
+            accountError={accountError}
+            liveMarkPrice={effectiveMarkPrice}
+            streamStatus={streamStatus}
+            open={sections.account}
+            onToggle={sectionTogglers.account}
+            onRetryAccount={() => void refreshAccount(false)}
+            onFundPaper={handleFundPaper}
+            onResetSession={handleResetSession}
+            busyAction={busyAction}
+          />
+
+          <PositionsCard
+            snapshot={snapshot}
+            account={account}
+            orders={orders}
+            liveMarkPrice={effectiveMarkPrice}
+            liveMarkPair={markPair}
+            lastSseAt={lastSseAt}
+            streamStatus={streamStatus}
+            open={sections.positions}
+            onToggle={sectionTogglers.positions}
+            busyAction={busyAction}
+            confirmCloseOpen={confirmCloseOpen}
+            onConfirmCloseOpenChange={setConfirmCloseOpen}
+            onClosePosition={handleClosePosition}
+            onSubmitOrder={handleSubmitOrder}
+          />
+
+          <OrdersCard
+            orders={orders}
+            updatedAt={ordersSyncedAt}
+            streamStatus={streamStatus}
+            loading={ordersLoading}
+            error={ordersError}
+            open={sections.orders}
+            onToggle={sectionTogglers.orders}
+            busyAction={busyAction}
+            onRefresh={() => void refreshOrders(false)}
+            onCancelOrder={handleCancelOrder}
+          />
+        </div>
+
+        {/* Right Column: Risk & Strategy, MT5 Bridge, Strategy Audit */}
+        <div className="flex min-w-0 flex-col gap-4 xl:col-span-5">
+          <RiskLimitsCard
+            snapshot={snapshot}
+            strategy={strategy}
+            events={events}
+            streamStatus={streamStatus}
+            open={sections.risk}
+            onToggle={sectionTogglers.risk}
+            busyAction={busyAction}
+            onSaveHardLimits={handleSaveHardLimits}
+            onSelectPreset={handleSelectPreset}
+            onSaveStrategyParams={handleSaveStrategyParams}
+            onApplyBotSetup={handleApplyBotSetup}
+          />
+
+          <Mt5BridgeCard
+            mt5={snapshot.mt5}
+            activePreset={snapshot.preset}
+            streamStatus={streamStatus}
+            open={sections.mt5}
+            onToggle={sectionTogglers.mt5}
+          />
+
+          <StrategyAuditCard
+            presets={snapshot.presets}
+            audits={audits}
+            streamStatus={streamStatus}
+            loading={auditsLoading}
+            error={auditsError}
+            open={sections.audit}
+            onToggle={sectionTogglers.audit}
+            onRetry={() => void refreshAudits(false)}
+            onAuditsUpdated={setAudits}
+          />
+        </div>
+      </div>
+
+      {/* Full-width Bottom Sections: Virtualized Event Log & Closed Trades */}
+      <EventLogCard
+        events={events}
+        updatedAt={eventsSyncedAt}
+        streamStatus={streamStatus}
+        loading={eventsLoading}
+        error={eventsError}
+        open={sections.events}
+        onToggle={sectionTogglers.events}
+        onRefresh={() => void refreshEvents(false)}
+      />
+
+      <ClosedTradesCard
+        trades={snapshot.state.closedTrades}
+        resolvedTickets={snapshot.state.resolvedTickets}
+        activePreset={snapshot.preset}
+        streamStatus={streamStatus}
+        open={sections.trades}
+        onToggle={sectionTogglers.trades}
+        onSendToStats={onSaveSnapshot ? handleSendToStats : undefined}
+      />
+
+      {/* Keyboard Shortcuts Cheat Sheet Dialog (?) */}
+      <AlertDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2">
+              <Keyboard className="size-4" />
+              <span>{t('botRun.shortcutsTitle')}</span>
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {t('botRun.shortcutsDesc')}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="flex flex-col gap-2 py-1 font-mono text-xs">
+            <div className="flex items-center justify-between gap-4 rounded-sm bg-muted/30 px-2.5 py-1.5">
+              <kbd className="rounded-sm bg-background px-1.5 py-0.5 font-bold">
+                P
+              </kbd>
+              <span className="flex-1 text-right text-muted-foreground">
+                {t('botRun.shortcutPause')}
               </span>
-              <strong className="font-mono text-xs font-semibold">
-                {activeMt5Packet?.symbol ?? 'BTCUSD'}
-              </strong>
             </div>
-            <div className="flex flex-col gap-0.5">
-              <span className="font-mono text-[10px] uppercase text-muted-foreground">
-                {isEs ? 'Acción Emitida' : 'Emitted Action'}
+            <div className="flex items-center justify-between gap-4 rounded-sm bg-muted/30 px-2.5 py-1.5">
+              <kbd className="rounded-sm bg-background px-1.5 py-0.5 font-bold">
+                C
+              </kbd>
+              <span className="flex-1 text-right text-muted-foreground">
+                {t('botRun.shortcutClose')}
               </span>
-              <strong
-                className={cn(
-                  'font-mono text-xs font-semibold',
-                  activeMt5Packet?.action === 'BUY'
-                    ? 'text-[var(--positive)]'
-                    : activeMt5Packet?.action === 'SELL' ||
-                        activeMt5Packet?.action === 'CLOSE_ALL'
-                      ? 'text-[var(--negative)]'
-                      : 'text-foreground',
-                )}
-              >
-                {activeMt5Packet?.action ?? 'HOLD'}
-              </strong>
             </div>
-            <div className="flex flex-col gap-0.5">
-              <span className="font-mono text-[10px] uppercase text-muted-foreground">
-                Magic Number
+            <div className="flex items-center justify-between gap-4 rounded-sm bg-muted/30 px-2.5 py-1.5">
+              <kbd className="rounded-sm bg-background px-1.5 py-0.5 font-bold">
+                /
+              </kbd>
+              <span className="flex-1 text-right text-muted-foreground">
+                {t('botRun.shortcutSearch')}
               </span>
-              <strong className="font-mono text-xs font-semibold">
-                #{mt5?.magicNumber ?? 202615}
-              </strong>
             </div>
-            <div className="flex flex-col gap-0.5">
-              <span className="font-mono text-[10px] uppercase text-muted-foreground">
-                {isEs ? 'SL / TP' : 'Emitted SL / TP'}
+            <div className="flex items-center justify-between gap-4 rounded-sm bg-muted/30 px-2.5 py-1.5">
+              <kbd className="rounded-sm bg-background px-1.5 py-0.5 font-bold">
+                ?
+              </kbd>
+              <span className="flex-1 text-right text-muted-foreground">
+                {t('botRun.shortcutHelp')}
               </span>
-              <strong className="font-mono text-xs font-semibold tabular-nums">
-                {activeMt5Packet?.stopLossPct ?? activePreset.strategy.stopLoss}% /{' '}
-                {activeMt5Packet?.takeProfitPct ??
-                  activePreset.strategy.takeProfit}
-                %
-              </strong>
             </div>
-            <div className="flex flex-col gap-0.5">
-              <span className="font-mono text-[10px] uppercase text-muted-foreground">
-                Profit-Lock
+            <div className="flex items-center justify-between gap-4 rounded-sm bg-muted/30 px-2.5 py-1.5">
+              <kbd className="rounded-sm bg-background px-1.5 py-0.5 font-bold">
+                Esc
+              </kbd>
+              <span className="flex-1 text-right text-muted-foreground">
+                {t('botRun.shortcutEsc')}
               </span>
-              <strong className="font-mono text-xs font-semibold tabular-nums">
-                {activeMt5Packet?.breakevenArmed
-                  ? `ARMED ($${activeMt5Packet.stopPrice.toFixed(2)})`
-                  : 'STANDBY'}
-              </strong>
-            </div>
-            <div className="flex flex-col gap-0.5">
-              <span className="font-mono text-[10px] uppercase text-muted-foreground">
-                {isEs ? 'Consultas MT5' : 'MT5 Polls'}
-              </span>
-              <strong className="truncate font-mono text-xs font-semibold">
-                {mt5?.pollCount ?? 0} polls ·{' '}
-                {mt5?.lastTerminalName ??
-                  (isEs ? 'Esperando EA' : 'Waiting for EA')}
-              </strong>
             </div>
           </div>
-
-          {activeMt5Packet && (
-            <pre className="max-h-48 overflow-auto rounded-sm border border-[var(--border-subtle)] bg-secondary/60 p-2.5 font-mono text-[11px] text-muted-foreground">
-              {JSON.stringify(activeMt5Packet, null, 2)}
-            </pre>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* Strategy Audit Table */}
-      <Card>
-        <CardHeader>
-          <CardTitle>
-            {isEs ? 'Auditoría de Estrategias' : 'Strategy Audit'}
-          </CardTitle>
-          <Button
-            type="button"
-            variant="outline"
-            size="xs"
-            disabled={busyAction !== null}
-            onClick={handleRunAccuracyAudit}
-          >
-            {busyAction === 'audit'
-              ? isEs
-                ? 'Auditando 8 estrategias en Binance...'
-                : 'Auditing 8 strategies on Binance...'
-              : isEs
-                ? 'Auditar las 8 Estrategias Ahora'
-                : 'Audit All 8 Strategies Now'}
-          </Button>
-        </CardHeader>
-
-        <CardContent className="p-3.5">
-          {auditReport ? (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>{isEs ? 'Estrategia / Preset' : 'Strategy / Preset'}</TableHead>
-                  <TableHead>TF</TableHead>
-                  <TableHead>{isEs ? 'Aciertos' : 'Wins/Total'}</TableHead>
-                  <TableHead className="text-right">Win Rate</TableHead>
-                  <TableHead className="text-right">Wilson 95%</TableHead>
-                  <TableHead className="text-right">PF</TableHead>
-                  <TableHead className="text-right">PnL</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {auditReport.reports.map((r) => (
-                  <TableRow key={r.presetId}>
-                    <TableCell className="font-semibold">{r.name}</TableCell>
-                    <TableCell>{r.timeframe}</TableCell>
-                    <TableCell>
-                      {r.wins} / {r.totalOperations}
-                    </TableCell>
-                    <TableCell className="text-right font-semibold text-[var(--positive)]">
-                      {r.winRatePct.toFixed(1)}%
-                    </TableCell>
-                    <TableCell className="text-right">
-                      {r.wilsonLowerBoundPct.toFixed(1)}%
-                    </TableCell>
-                    <TableCell className="text-right">
-                      {r.profitFactor ?? '—'}
-                    </TableCell>
-                    <TableCell
-                      className={cn(
-                        'text-right font-semibold',
-                        r.netPnlUsd >= 0
-                          ? 'text-[var(--positive)]'
-                          : 'text-[var(--negative)]',
-                      )}
-                    >
-                      {r.netPnlUsd >= 0 ? '+' : ''}${r.netPnlUsd.toFixed(2)}
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          ) : (
-            <p className="text-xs text-muted-foreground">
-              {isEs
-                ? 'Ejecuta la auditoría para comparar los 8 presets.'
-                : 'Run audit to compare all 8 presets.'}
-            </p>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* Engine Event Log */}
-      <Card>
-        <CardHeader>
-          <CardTitle>{isEs ? 'Bitácora de Eventos' : 'Event Log'}</CardTitle>
-          {closedTrades.length > 0 && onSaveSnapshot && (
-            <Button
-              type="button"
-              variant="outline"
-              size="xs"
-              onClick={handleSendToStats}
-            >
-              <BarChart3 className="size-3.5" />
-              <span>
-                {isEs
-                  ? 'Enviar Operaciones a Estadísticas'
-                  : 'Send Trades to Statistics'}
-              </span>
-              <ArrowRight className="size-3.5" />
-            </Button>
-          )}
-        </CardHeader>
-
-        <CardContent className="p-0">
-          <ScrollArea className="max-h-56">
-            <ul className="flex flex-col divide-y divide-border/70">
-              {(engineState?.logs ?? []).slice(0, 12).map((log) => (
-                <li
-                  key={log.id}
-                  className="flex items-start gap-2.5 px-3.5 py-2 font-mono text-[11.5px]"
-                >
-                  <Badge variant="secondary" className="shrink-0">
-                    {log.level.toUpperCase()}
-                  </Badge>
-                  <span className="text-foreground">{log.message}</span>
-                </li>
-              ))}
-            </ul>
-          </ScrollArea>
-        </CardContent>
-      </Card>
-
-      {/* Closed Spot Trades / Resolved Binary Tickets */}
-      <section className="flex flex-col gap-2">
-        <h2 className="font-display text-sm font-semibold uppercase tracking-[0.06em] text-foreground">
-          {activePreset.domain === 'crypto-spot'
-            ? isEs
-              ? `Operaciones Cerradas (${closedTrades.length})`
-              : `Closed Trades (${closedTrades.length})`
-            : isEs
-              ? `Contratos Resueltos (${resolvedTickets.length})`
-              : `Resolved Contracts (${resolvedTickets.length})`}
-        </h2>
-
-        {activePreset.domain === 'crypto-spot' ? (
-          <TradesTable trades={closedTrades} />
-        ) : resolvedTickets.length === 0 ? (
-          <Card className="p-6 text-center text-xs text-muted-foreground">
-            {isEs
-              ? 'Sin contratos resueltos en esta sesión.'
-              : 'No resolved contracts in this session yet.'}
-          </Card>
-        ) : (
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>#</TableHead>
-                <TableHead>
-                  {isEs ? 'Regla / Contrato' : 'Rule / Contract'}
-                </TableHead>
-                <TableHead>{isEs ? 'Dirección' : 'Outcome'}</TableHead>
-                <TableHead className="text-right">Stake</TableHead>
-                <TableHead>{isEs ? 'Resultado' : 'Result'}</TableHead>
-                <TableHead className="text-right">PnL</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {resolvedTickets.slice(0, 12).map((tk) => (
-                <TableRow key={tk.id}>
-                  <TableCell className="text-muted-foreground">#{tk.id}</TableCell>
-                  <TableCell>{tk.title}</TableCell>
-                  <TableCell>
-                    <Badge
-                      variant={tk.outcome === 'YES' ? 'positive' : 'negative'}
-                    >
-                      {tk.outcome}
-                    </Badge>
-                  </TableCell>
-                  <TableCell className="text-right">
-                    ${tk.stakeUsd.toFixed(2)}
-                  </TableCell>
-                  <TableCell>
-                    <Badge variant={tk.won ? 'positive' : 'negative'}>
-                      {tk.won ? 'WON' : 'LOST'}
-                    </Badge>
-                  </TableCell>
-                  <TableCell
-                    className={cn(
-                      'text-right font-semibold',
-                      tk.netPnlUsd >= 0
-                        ? 'text-[var(--positive)]'
-                        : 'text-[var(--negative)]',
-                    )}
-                  >
-                    {tk.netPnlUsd >= 0 ? '+' : ''}${tk.netPnlUsd.toFixed(2)}
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        )}
-      </section>
+          <AlertDialogFooter>
+            <AlertDialogAction onClick={() => setShortcutsOpen(false)}>
+              {t('botRun.close')}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

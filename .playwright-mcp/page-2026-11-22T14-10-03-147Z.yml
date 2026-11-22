@@ -1,0 +1,130 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - generic [ref=e6]:
+      - button "Back to Dashboard" [ref=e257] [cursor=pointer]:
+        - generic [ref=e258]: Dashboard
+      - generic [ref=e7]: FLARE
+      - generic [aria-hidden] [ref=e12]: /
+      - generic [ref=e13]: Charts
+  - main [ref=e14]:
+    - dialog "BTC/USDT Chart" [ref=e261]:
+      - generic [ref=e262]:
+        - generic [ref=e263]:
+          - combobox "Pair" [ref=e264] [cursor=pointer]:
+            - generic: BTC/USDT
+          - generic [ref=e267]:
+            - generic [ref=e268]: $60,794.94
+            - generic [ref=e269]: +0.09%
+          - generic [ref=e270]: WS LIVE
+          - group "Timeframe" [ref=e273]:
+            - button "5m" [ref=e274] [cursor=pointer]
+            - button "15m" [pressed] [ref=e275] [cursor=pointer]
+            - button "1h" [ref=e276] [cursor=pointer]
+            - button "4h" [ref=e277] [cursor=pointer]
+            - button "1d" [ref=e278] [cursor=pointer]
+        - generic [ref=e279]:
+          - button "Visible bars" [ref=e280] [cursor=pointer]:
+            - generic [ref=e281]: 110V
+          - button "Indicators 7" [ref=e282] [cursor=pointer]:
+            - generic [ref=e283]: Indicators
+            - generic [ref=e284]: "7"
+          - button "Calibrate BTC" [ref=e285] [cursor=pointer]
+          - button "Reset View" [ref=e287] [cursor=pointer]
+          - button "Side Panel" [ref=e288] [cursor=pointer]
+          - button "Predictions" [ref=e289] [cursor=pointer]
+          - button "Run Bot" [ref=e290] [cursor=pointer]
+          - button "Exit fullscreen (Esc)" [active] [ref=e291] [cursor=pointer]:
+            - generic [ref=e292]: Close
+      - generic [ref=e293]:
+        - navigation "Chart drawing tools" [ref=e294]:
+          - button "Cursor" [pressed] [ref=e295] [cursor=pointer]
+          - button "Measure" [ref=e296] [cursor=pointer]
+          - button "Trendline" [ref=e297] [cursor=pointer]
+          - button "S/R Level" [ref=e298] [cursor=pointer]
+          - button "Fibonacci" [ref=e299] [cursor=pointer]
+          - button "OHLC Magnet" [pressed] [ref=e300] [cursor=pointer]
+          - button "Undo" [disabled]
+          - button "Clear (0)" [disabled]
+        - generic [ref=e302]:
+          - generic [ref=e303]:
+            - generic [ref=e305]:
+              - generic [ref=e306]:
+                - strong [ref=e307]: 60,794.94
+                - generic [ref=e308]: +0.09%
+              - generic [ref=e309]:
+                - text: O 60,739.82 · H 60,850.01 · L 60,728.61 · C
+                - generic [ref=e310]: 60,794.94
+                - text: ·
+                - generic [ref=e311]: V 65.9
+              - generic [ref=e312]: Nov 22, 14:00 UTC
+            - generic [ref=e313]:
+              - generic [ref=e314]:
+                - generic [ref=e316]: EMA 12
+                - generic [ref=e317]: ": 60,758.30"
+              - generic [ref=e318]:
+                - generic [ref=e320]: EMA 26
+                - generic [ref=e321]: ": 60,524.55"
+              - generic [ref=e322]:
+                - generic [ref=e324]: EMA 50
+                - generic [ref=e325]: ": 60,242.53"
+              - generic [ref=e326]:
+                - generic [ref=e328]: BB Hi
+                - generic [ref=e329]: ": 61,377.13"
+              - generic [ref=e330]:
+                - generic [ref=e332]: BB Mid
+                - generic [ref=e333]: ": 60,807.15"
+              - generic [ref=e334]:
+                - generic [ref=e336]: BB Lo
+                - generic [ref=e337]: ": 60,237.17"
+              - generic [ref=e338]: Buy
+              - generic [ref=e344]: Sell
+            - generic [ref=e350]:
+              - img "Candlestick chart with 110 candles, from Nov 21, 10:45 to Nov 22, 14:00 UTC, with 2 signals" [ref=e351]:
+                - generic [ref=e353]: Nov 21, 17:30
+                - generic [ref=e355]: Nov 22, 00:30
+                - generic [ref=e357]: Nov 22, 07:15
+                - generic [ref=e359]: 56,000.00
+                - generic [ref=e361]: 58,000.00
+                - generic [ref=e363]: 60,000.00
+                - generic [ref=e365]: 62,000.00
+                - generic [ref=e367]: 64,000.00
+                - generic [ref=e369]:
+                  - generic:
+                    - generic: H 61,669.99
+                    - generic: L 57,854.00
+                  - generic [ref=e710]: TAKE PROFIT (+4.00% · 2.0R)
+                  - generic [ref=e713]: PROFIT-LOCK 50% TP (Breakeven)
+                  - generic [ref=e716]: LONG ENTRY (BTC/USDT)
+                  - generic [ref=e719]: STOP LOSS (-2.00%)
+                - generic [ref=e724]: TP +4.00%
+                - generic [ref=e727]: LOCK 50%
+                - generic [ref=e730]: SL -2.00%
+                - generic [ref=e733]: 60,794.94
+                - generic [ref=e736]: Nov 21, 10:45
+                - generic [ref=e737]: Nov 22, 14:00
+              - toolbar "TradingView-style zoom and pan controls" [ref=e738]:
+                - button "Pan left" [ref=e739] [cursor=pointer]
+                - button "Zoom Out" [ref=e740] [cursor=pointer]
+                - generic [ref=e741]: 110V
+                - button "Zoom In" [ref=e742] [cursor=pointer]
+                - button "Pan right" [ref=e743] [cursor=pointer]
+                - button "Reset view" [ref=e745] [cursor=pointer]
+                - button "Wheel ON" [ref=e746] [cursor=pointer]
+          - generic [ref=e749]:
+            - generic [ref=e750]:
+              - generic [ref=e751]: RSI (14)
+              - strong [ref=e752]: "58.7"
+              - generic [ref=e753]: Nov 22, 14:00 UTC
+            - img "RSI panel with 14 periods" [ref=e754]:
+              - generic [ref=e757]: "70"
+              - generic [ref=e759]: "50"
+              - generic [ref=e761]: "30"
+              - generic [ref=e764]: "58.7"
+  - region "Main navigation":
+    - navigation "Main navigation" [ref=e216]:
+      - button "Dashboard" [ref=e217] [cursor=pointer]
+      - button "Run bot" [ref=e225] [cursor=pointer]
+      - button "Backtest" [ref=e231] [cursor=pointer]
+      - button "Predictions" [ref=e238] [cursor=pointer]
+      - button "Statistics" [ref=e245] [cursor=pointer]
+      - button "More" [ref=e251] [cursor=pointer]

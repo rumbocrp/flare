@@ -5,7 +5,7 @@ import type { Tone } from '@/types'
 type MetricCardProps = {
   label: string
   value: string
-  hint: string
+  hint?: string
   tone?: Tone
 }
 
@@ -15,12 +15,6 @@ const VALUE_TONE_CLASS: Record<Tone, string> = {
   negative: 'text-[var(--negative)]',
 }
 
-const ACCENT_BAR_CLASS: Record<Tone, string> = {
-  neutral: 'border-t-border',
-  positive: 'border-t-[var(--positive)]/75',
-  negative: 'border-t-[var(--negative)]/75',
-}
-
 function MetricCard({
   label,
   value,
@@ -28,13 +22,8 @@ function MetricCard({
   tone = 'neutral',
 }: MetricCardProps) {
   return (
-    <Card
-      className={cn(
-        'gap-1 border-t-2 px-3.5 py-3 transition-all duration-150 hover:border-[var(--border-strong)]',
-        ACCENT_BAR_CLASS[tone],
-      )}
-    >
-      <span className="font-mono text-[10px] font-semibold uppercase tracking-[0.07em] text-muted-foreground">
+    <Card className="gap-1 px-4 py-3.5">
+      <span className="text-xs font-medium text-muted-foreground">
         {label}
       </span>
       <strong
@@ -45,9 +34,11 @@ function MetricCard({
       >
         {value}
       </strong>
-      <span className="truncate text-[11px] leading-snug text-[var(--text-subtle)] tabular-nums">
-        {hint}
-      </span>
+      {hint && (
+        <span className="truncate text-[11px] leading-snug text-[var(--text-subtle)] tabular-nums">
+          {hint}
+        </span>
+      )}
     </Card>
   )
 }

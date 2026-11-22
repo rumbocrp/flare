@@ -5,7 +5,7 @@ function Table({ className, ...props }: ComponentProps<'table'>) {
   return (
     <div
       data-slot="table-container"
-      className="relative w-full overflow-x-auto rounded-md border border-border bg-card shadow-[var(--shadow-card)]"
+      className="relative w-full overflow-x-auto rounded-md bg-card"
     >
       <table
         data-slot="table"
@@ -23,7 +23,7 @@ function TableHeader({ className, ...props }: ComponentProps<'thead'>) {
   return (
     <thead
       data-slot="table-header"
-      className={cn('bg-secondary/50 [&_tr]:border-b [&_tr]:border-[var(--border-subtle)]', className)}
+      className={cn('bg-muted/35', className)}
       {...props}
     />
   )
@@ -33,7 +33,7 @@ function TableBody({ className, ...props }: ComponentProps<'tbody'>) {
   return (
     <tbody
       data-slot="table-body"
-      className={cn('[&_tr:last-child]:border-0', className)}
+      className={cn('[&_tr:nth-child(even)]:bg-muted/15', className)}
       {...props}
     />
   )
@@ -44,7 +44,7 @@ function TableFooter({ className, ...props }: ComponentProps<'tfoot'>) {
     <tfoot
       data-slot="table-footer"
       className={cn(
-        'border-t border-[var(--border-subtle)] bg-secondary/35 font-medium [&>tr]:last:border-b-0',
+        'bg-muted/35 font-medium',
         className,
       )}
       {...props}
@@ -57,7 +57,7 @@ function TableRow({ className, ...props }: ComponentProps<'tr'>) {
     <tr
       data-slot="table-row"
       className={cn(
-        'border-b border-[var(--border-subtle)] transition-colors hover:bg-accent/45 data-[state=selected]:bg-accent',
+        'transition-colors hover:bg-[var(--surface-hover)]/70 data-[state=selected]:bg-[var(--surface-hover)]',
         className,
       )}
       {...props}
@@ -70,7 +70,7 @@ function TableHead({ className, ...props }: ComponentProps<'th'>) {
     <th
       data-slot="table-head"
       className={cn(
-        'h-8 px-2.5 text-left align-middle font-mono text-[10px] font-semibold uppercase tracking-[0.06em] whitespace-nowrap text-muted-foreground',
+        'h-8 px-2.5 text-left align-middle text-[11px] font-semibold whitespace-nowrap text-muted-foreground',
         className,
       )}
       {...props}
@@ -83,7 +83,7 @@ function TableCell({ className, ...props }: ComponentProps<'td'>) {
     <td
       data-slot="table-cell"
       className={cn(
-        'px-2.5 py-2 align-middle font-mono text-[11.5px] whitespace-nowrap text-foreground',
+        'px-2.5 py-2 align-middle text-xs whitespace-nowrap text-foreground',
         className,
       )}
       {...props}

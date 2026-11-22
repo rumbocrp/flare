@@ -4,21 +4,17 @@ import { cva, type VariantProps } from 'class-variance-authority'
 import { cn } from '@/lib/utils'
 
 const badgeVariants = cva(
-  'inline-flex items-center gap-1 rounded-[4px] border px-1.5 py-0.5 font-mono text-[10px] font-semibold leading-tight uppercase tracking-[0.06em] whitespace-nowrap transition-colors',
+  'inline-flex items-center gap-1 rounded-[4px] px-1.5 py-0.5 font-mono text-[10.5px] font-medium leading-tight whitespace-nowrap transition-colors',
   {
     variants: {
       variant: {
-        default: 'border-primary/35 bg-primary/15 text-primary',
-        secondary: 'border-border/80 bg-secondary/80 text-muted-foreground',
-        outline: 'border-border bg-secondary/35 text-foreground',
-        positive:
-          'border-[var(--positive)]/40 bg-[var(--positive-soft)] text-[var(--positive)]',
-        negative:
-          'border-[var(--negative)]/40 bg-[var(--negative-soft)] text-[var(--negative)]',
-        warning:
-          'border-[var(--warning)]/40 bg-[var(--warning-soft)] text-[var(--warning)]',
-        violet:
-          'border-[var(--brand-violet)]/40 bg-[var(--brand-violet)]/12 text-[var(--brand-violet)]',
+        default: 'bg-primary/14 text-primary',
+        secondary: 'bg-muted/55 text-muted-foreground',
+        outline: 'bg-muted/40 text-foreground',
+        positive: 'bg-[var(--positive-soft)] text-[var(--positive)]',
+        negative: 'bg-[var(--negative-soft)] text-[var(--negative)]',
+        warning: 'bg-[var(--warning-soft)] text-[var(--warning)]',
+        violet: 'bg-[var(--brand-violet)]/14 text-[var(--brand-violet)]',
       },
     },
     defaultVariants: {

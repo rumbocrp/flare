@@ -15,6 +15,7 @@
  * - Automatically registers a venue kill-switch handler with `exchangeAdapter`
  *   so Emergency Kill-Switch cancels open Polymarket CLOB orders too.
  */
+import crypto from 'node:crypto'
 import {
   AssetType,
   Chain,
@@ -46,7 +47,10 @@ import {
   registerKillSwitchHandler,
   type ExchangeOrderRecord,
 } from './exchangeAdapter'
-import { buildPredictionStakeEntry } from './ledger/doubleEntryLedger'
+import {
+  buildPredictionStakeEntry,
+  createBalancedLedgerEntry,
+} from './ledger/doubleEntryLedger'
 import { getStateStore } from './store'
 
 export type PolymarketOrderType = 'GTC' | 'GTD' | 'FOK' | 'FAK'
@@ -75,6 +79,7 @@ export type PolymarketOrderRecord = {
   stakeUsd: number
   feeUsd: number
   status: PolymarketOrderStatus
+  source?: 'manual' | 'bot-auto'
   transactionHashes?: string[]
   reason?: string
 }
@@ -133,6 +138,8 @@ export interface PolymarketClobClientLike {
     userOrder: UserOrder,
     options?: Partial<CreateOrderOptions>,
     orderType?: OrderType.GTC | OrderType.GTD,
+    deferExec?: boolean,
+    postOnly?: boolean,
   ): Promise<Partial<OrderResponse>>
   createAndPostMarketOrder(
     userMarketOrder: UserMarketOrder,
@@ -154,7 +161,22 @@ export type SubmitPolymarketOrderParams = {
   quote: ExecutablePredictionQuote | null | undefined
   side?: PolymarketExecutionSide
   stakeUsd: number
+  /** Optional fixed-dollar canary override (enforced against HardRiskLimits.maxOrderNotionalUsd). */
+  stakeUsdOverride?: number
   orderType?: PolymarketOrderType
+  clientOrderId: string
+  nowMs?: number
+  source?: 'manual' | 'bot-auto'
+}
+
+export type SubmitPolymarketMakerQuoteParams = {
+  tenantId?: string
+  quote: ExecutablePredictionQuote | null | undefined
+  side?: PolymarketExecutionSide
+  limitPrice: number
+  /** Optional fixed-dollar stake override; defaults to $5.00 canary stake when omitted. */
+  stakeUsd?: number
+  postOnly?: boolean
   clientOrderId: string
   nowMs?: number
   source?: 'manual' | 'bot-auto'
@@ -165,6 +187,16 @@ export type SubmitPolymarketOrderResult = {
   error?: string
   order: PolymarketOrderRecord
 }
+
+export type CancelOrdersForWindowResult = {
+  ok: boolean
+  canceledCount: number
+  canceledOrderIds: string[]
+  failedOrderIds: string[]
+  error?: string
+}
+
+export const DEFAULT_CANARY_STAKE_USD = 5
 
 const DEFAULT_CLOB_HOST = 'https://clob.polymarket.com'
 const DEFAULT_POLYGON_RPC = 'https://polygon-rpc.com'
@@ -187,8 +219,9 @@ type ParsedPolymarketEnv = {
 
 type TenantPolymarketState = {
   orders: PolymarketOrderRecord[]
-  orderCounter: number
   lastReconciliation: PolymarketReconciliationSnapshot | null
+  releasedCanceledEscrowOrderIds: Set<string>
+  sqlCancelMutex: Promise<void>
 }
 
 const tenantPolyStates = new Map<string, TenantPolymarketState>()
@@ -205,12 +238,32 @@ function getTenantPolyState(
   if (!state) {
     state = {
       orders: [],
-      orderCounter: 1,
       lastReconciliation: null,
+      releasedCanceledEscrowOrderIds: new Set<string>(),
+      sqlCancelMutex: Promise.resolve(),
     }
     tenantPolyStates.set(tenantId, state)
   }
   return state
+}
+
+async function withTenantSqlCancelLock<T>(
+  tenantId: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const state = getTenantPolyState(tenantId)
+  const prev = state.sqlCancelMutex
+  let release!: () => void
+  const current = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  state.sqlCancelMutex = current
+  await prev
+  try {
+    return await fn()
+  } finally {
+    release()
+  }
 }
 
 function normalizePrivateKey(raw?: string): `0x${string}` | null {
@@ -411,15 +464,14 @@ export function getPolymarketExecutorStatus(
   }
 }
 
-function recordPolymarketOrder(
-  state: TenantPolymarketState,
+function toExchangeOrderRecord(
   order: PolymarketOrderRecord,
-  source: 'manual' | 'bot-auto' = 'bot-auto',
-): void {
-  state.orders = [order, ...state.orders].slice(0, MAX_POLY_ORDER_HISTORY)
-  const storeOrder: ExchangeOrderRecord = {
+  source: 'manual' | 'bot-auto' = order.source ?? 'bot-auto',
+): ExchangeOrderRecord {
+  return {
     id: order.id,
-    clientOrderId: order.clientOrderId,
+    clientOrderId:
+      order.status === 'REJECTED' ? undefined : order.clientOrderId,
     venueOrderId: order.venueOrderId,
     timestamp: order.timestamp,
     pair: `${order.instrumentId}/${order.outcome}`,
@@ -439,9 +491,80 @@ function recordPolymarketOrder(
     source,
     reason: order.reason,
   }
-  void getStateStore()
-    .appendOrder(order.tenantId, storeOrder)
-    .catch(() => {})
+}
+
+async function persistOrderToStore(
+  order: PolymarketOrderRecord,
+  source: 'manual' | 'bot-auto' = order.source ?? 'bot-auto',
+): Promise<void> {
+  try {
+    await getStateStore().appendOrder(
+      order.tenantId,
+      toExchangeOrderRecord(order, source),
+    )
+  } catch {
+    // Store persistence errors must not mask venue execution state
+  }
+}
+
+function recordPolymarketOrder(
+  state: TenantPolymarketState,
+  order: PolymarketOrderRecord,
+  source: 'manual' | 'bot-auto' = 'bot-auto',
+): void {
+  const storedOrder: PolymarketOrderRecord = { ...order, source }
+  const deduped = state.orders.filter(
+    (o) =>
+      o.id !== storedOrder.id &&
+      !(
+        o.clientOrderId === storedOrder.clientOrderId &&
+        o.status === 'REJECTED'
+      ),
+  )
+  state.orders = [storedOrder, ...deduped].slice(0, MAX_POLY_ORDER_HISTORY)
+  void persistOrderToStore(storedOrder, source)
+}
+
+function releaseCanceledBuyEscrow(params: {
+  tenantId: string
+  orderId: string
+  instrumentId: string
+  stakeUsd: number
+  reason: string
+}): void {
+  const stake = Number(params.stakeUsd.toFixed(2))
+  if (!Number.isFinite(stake) || stake <= 0) return
+  const cleanTenant = params.tenantId.trim() || DEFAULT_TENANT_ID
+  const state = getTenantPolyState(cleanTenant)
+  if (state.releasedCanceledEscrowOrderIds.has(params.orderId)) return
+  state.releasedCanceledEscrowOrderIds.add(params.orderId)
+  appendTenantLedgerEntry(
+    cleanTenant,
+    createBalancedLedgerEntry({
+      tenantId: cleanTenant,
+      kind: 'PREDICTION_SETTLEMENT',
+      referenceId: params.orderId,
+      description: `Canceled BUY order escrow release $${stake.toFixed(2)} (${params.instrumentId}): ${params.reason}`,
+      postings: [
+        {
+          account: 'wallet:USDT',
+          asset: 'USDT',
+          direction: 'DEBIT',
+          amount: stake,
+        },
+        {
+          account: 'escrow:prediction:USDT',
+          asset: 'USDT',
+          direction: 'CREDIT',
+          amount: stake,
+        },
+      ],
+      metadata: {
+        instrumentId: params.instrumentId,
+        canceled: true,
+      },
+    }),
+  )
 }
 
 /**
@@ -457,12 +580,17 @@ export async function submitPolymarketOrder(
   const nowMs = params.nowMs ?? Date.now()
   const side: PolymarketExecutionSide = params.side ?? 'BUY'
   const orderType: PolymarketOrderType = params.orderType ?? 'FOK'
+  const source: 'manual' | 'bot-auto' = params.source ?? 'bot-auto'
+  const effectiveStakeUsd =
+    params.stakeUsdOverride !== undefined
+      ? params.stakeUsdOverride
+      : params.stakeUsd
 
   // 1. Idempotency check
   const existing = state.orders.find(
     (o) => o.clientOrderId === params.clientOrderId,
   )
-  if (existing) {
+  if (existing && existing.status !== 'REJECTED') {
     const ok = existing.status === 'LIVE' || existing.status === 'MATCHED'
     return {
       ok,
@@ -471,15 +599,14 @@ export async function submitPolymarketOrder(
     }
   }
 
-  const nextId = () => {
-    const id = `POLY-${state.orderCounter}`
-    state.orderCounter += 1
-    return id
-  }
+  const nextId = () => `POLY-${crypto.randomUUID()}`
 
   const makeRejected = (reason: string): SubmitPolymarketOrderResult => {
+    const safeStake = Number.isFinite(effectiveStakeUsd)
+      ? Number(Math.max(0, effectiveStakeUsd).toFixed(2))
+      : 0
     const order: PolymarketOrderRecord = {
-      id: nextId(),
+      id: existing?.status === 'REJECTED' ? existing.id : nextId(),
       clientOrderId: params.clientOrderId,
       timestamp: new Date(nowMs).toISOString(),
       tenantId,
@@ -490,12 +617,13 @@ export async function submitPolymarketOrder(
       orderType,
       limitPrice: params.quote?.ask ?? 0,
       shares: 0,
-      stakeUsd: Number(Math.max(0, params.stakeUsd).toFixed(2)),
+      stakeUsd: safeStake,
       feeUsd: 0,
       status: 'REJECTED',
+      source,
       reason,
     }
-    recordPolymarketOrder(state, order, params.source ?? 'bot-auto')
+    recordPolymarketOrder(state, order, source)
     return { ok: false, error: reason, order }
   }
 
@@ -519,12 +647,15 @@ export async function submitPolymarketOrder(
       `Emergency Kill-Switch ACTIVE (${risk.killSwitchReason ?? 'Manual lock'}).`,
     )
   }
-  if (!Number.isFinite(params.stakeUsd) || params.stakeUsd <= 0) {
+  if (!Number.isFinite(effectiveStakeUsd) || effectiveStakeUsd <= 0) {
     return makeRejected('Order stakeUsd must be greater than $0 USD.')
   }
-  if (params.stakeUsd > risk.hardLimits.maxOrderNotionalUsd) {
+  if (Number(effectiveStakeUsd.toFixed(2)) < 0.01) {
+    return makeRejected('Order stakeUsd must be at least $0.01 USD.')
+  }
+  if (effectiveStakeUsd > risk.hardLimits.maxOrderNotionalUsd) {
     return makeRejected(
-      `Stake $${params.stakeUsd.toFixed(2)} exceeds HardRiskLimits maxOrderNotionalUsd ($${risk.hardLimits.maxOrderNotionalUsd.toFixed(2)}).`,
+      `Stake $${effectiveStakeUsd.toFixed(2)} exceeds HardRiskLimits maxOrderNotionalUsd ($${risk.hardLimits.maxOrderNotionalUsd.toFixed(2)}).`,
     )
   }
   if (risk.dailyOrderCount >= risk.hardLimits.maxDailyOrders) {
@@ -559,14 +690,14 @@ export async function submitPolymarketOrder(
   const limitPrice = roundPriceToTick(rawTargetPrice, tickSize)
   const shares =
     limitPrice > 0
-      ? Number((params.stakeUsd / limitPrice).toFixed(4))
+      ? Number((effectiveStakeUsd / limitPrice).toFixed(4))
       : 0
   if (shares <= 0) {
     return makeRejected('Computed share size must be greater than 0.')
   }
 
   const feeUsd = Number(
-    (params.stakeUsd * (quoteCheck.feePctOfStake / 100)).toFixed(4),
+    (effectiveStakeUsd * (quoteCheck.feePctOfStake / 100)).toFixed(4),
   )
   const sdkSide = side === 'SELL' ? Side.SELL : Side.BUY
   const options: Partial<CreateOrderOptions> = {
@@ -585,7 +716,7 @@ export async function submitPolymarketOrder(
         price: limitPrice,
         amount:
           side === 'BUY'
-            ? Number(params.stakeUsd.toFixed(2))
+            ? Number(effectiveStakeUsd.toFixed(2))
             : shares,
         side: sdkSide,
         orderType: orderType === 'FAK' ? OrderType.FAK : OrderType.FOK,
@@ -632,15 +763,16 @@ export async function submitPolymarketOrder(
       orderType,
       limitPrice,
       shares,
-      stakeUsd: Number(params.stakeUsd.toFixed(2)),
+      stakeUsd: Number(effectiveStakeUsd.toFixed(2)),
       feeUsd,
       status,
+      source,
       transactionHashes: Array.isArray(resp.transactionsHashes)
         ? resp.transactionsHashes
         : undefined,
       reason: `Polymarket CLOB ${status} (#${resp.orderID})`,
     }
-    recordPolymarketOrder(state, acceptedOrder, params.source ?? 'bot-auto')
+    recordPolymarketOrder(state, acceptedOrder, source)
     recordExternalVenueOrderCount(tenantId)
 
     // 6. Post balanced double-entry accounting entry on BUY stake
@@ -665,6 +797,672 @@ export async function submitPolymarketOrder(
   }
 }
 
+/**
+ * Submits a resting GTC post-only maker limit quote on Polymarket CLOB at an
+ * explicit `limitPrice` rounded to `tickSize` with `$0` upfront maker fee.
+ */
+export async function submitPolymarketMakerQuote(
+  params: SubmitPolymarketMakerQuoteParams,
+): Promise<SubmitPolymarketOrderResult> {
+  const tenantId = params.tenantId ?? DEFAULT_TENANT_ID
+  const state = getTenantPolyState(tenantId)
+  const nowMs = params.nowMs ?? Date.now()
+  const side: PolymarketExecutionSide = params.side ?? 'BUY'
+  const postOnly = params.postOnly ?? true
+  const source: 'manual' | 'bot-auto' = params.source ?? 'bot-auto'
+  const effectiveStakeUsd =
+    params.stakeUsd !== undefined ? params.stakeUsd : DEFAULT_CANARY_STAKE_USD
+
+  // 1. Idempotency check
+  const existing = state.orders.find(
+    (o) => o.clientOrderId === params.clientOrderId,
+  )
+  if (existing && existing.status !== 'REJECTED') {
+    const ok = existing.status === 'LIVE' || existing.status === 'MATCHED'
+    return {
+      ok,
+      error: ok ? undefined : existing.reason,
+      order: existing,
+    }
+  }
+
+  const nextId = () => `POLY-${crypto.randomUUID()}`
+
+  const makeRejected = (reason: string): SubmitPolymarketOrderResult => {
+    const safeStake = Number.isFinite(effectiveStakeUsd)
+      ? Number(Math.max(0, effectiveStakeUsd).toFixed(2))
+      : 0
+    const safePrice = Number.isFinite(params.limitPrice) ? params.limitPrice : 0
+    const order: PolymarketOrderRecord = {
+      id: existing?.status === 'REJECTED' ? existing.id : nextId(),
+      clientOrderId: params.clientOrderId,
+      timestamp: new Date(nowMs).toISOString(),
+      tenantId,
+      instrumentId: params.quote?.instrumentId ?? 'unknown',
+      tokenId: params.quote?.tokenId ?? '',
+      outcome: params.quote?.outcome ?? 'YES',
+      side,
+      orderType: 'GTC',
+      limitPrice: safePrice,
+      shares: 0,
+      stakeUsd: safeStake,
+      feeUsd: 0,
+      status: 'REJECTED',
+      source,
+      reason,
+    }
+    recordPolymarketOrder(state, order, source)
+    return { ok: false, error: reason, order }
+  }
+
+  // 2. Dual-key live arming check
+  const env = readPolymarketEnv()
+  if (!env.liveArmed) {
+    return makeRejected(
+      'Polymarket live execution is disarmed (set FLARE_POLYMARKET_LIVE=true to arm).',
+    )
+  }
+  if (!isPolymarketConfigured()) {
+    return makeRejected(
+      'Polymarket CLOB signer not configured (set POLY_PRIVATE_KEY).',
+    )
+  }
+
+  // 3. Tenant Kill-Switch & Hard Risk Limits check
+  const risk = getExchangeStatusSnapshot(tenantId)
+  if (risk.killSwitchActive) {
+    return makeRejected(
+      `Emergency Kill-Switch ACTIVE (${risk.killSwitchReason ?? 'Manual lock'}).`,
+    )
+  }
+  if (!Number.isFinite(effectiveStakeUsd) || effectiveStakeUsd <= 0) {
+    return makeRejected('Order stakeUsd must be greater than $0 USD.')
+  }
+  if (Number(effectiveStakeUsd.toFixed(2)) < 0.01) {
+    return makeRejected('Order stakeUsd must be at least $0.01 USD.')
+  }
+  if (effectiveStakeUsd > risk.hardLimits.maxOrderNotionalUsd) {
+    return makeRejected(
+      `Stake $${effectiveStakeUsd.toFixed(2)} exceeds HardRiskLimits maxOrderNotionalUsd ($${risk.hardLimits.maxOrderNotionalUsd.toFixed(2)}).`,
+    )
+  }
+  if (risk.dailyOrderCount >= risk.hardLimits.maxDailyOrders) {
+    return makeRejected(
+      `Daily hard order count reached (${risk.dailyOrderCount}/${risk.hardLimits.maxDailyOrders}).`,
+    )
+  }
+  if (risk.dailyRealizedLossUsd >= risk.hardLimits.maxDailyLossUsd) {
+    return makeRejected(
+      `Daily hard loss limit reached (-$${risk.dailyRealizedLossUsd.toFixed(2)} >= -$${risk.hardLimits.maxDailyLossUsd.toFixed(2)}).`,
+    )
+  }
+
+  // 4. Limit price & executable quote validation
+  if (
+    !Number.isFinite(params.limitPrice) ||
+    params.limitPrice <= 0 ||
+    params.limitPrice >= 1
+  ) {
+    return makeRejected(
+      `Maker limitPrice (${String(params.limitPrice)}) must be strictly inside (0, 1).`,
+    )
+  }
+
+  const quoteCheck = validateExecutableQuote(params.quote, nowMs)
+  if (!quoteCheck.ok) {
+    return makeRejected(`[QUOTE GUARD] ${quoteCheck.reason}`)
+  }
+  const tokenId = quoteCheck.quote.tokenId?.trim()
+  if (!tokenId) {
+    return makeRejected(
+      `Missing Polymarket CLOB tokenId for ${quoteCheck.quote.instrumentId} (${quoteCheck.quote.outcome}).`,
+    )
+  }
+
+  const tickSize = normalizeTickSize(quoteCheck.quote.tickSize)
+  if (!VALID_TICK_SIZES.includes(tickSize)) {
+    return makeRejected(`Unsupported Polymarket tickSize: ${tickSize}`)
+  }
+  const tick = Number(tickSize)
+  let limitPrice = roundPriceToTick(params.limitPrice, tickSize)
+
+  if (postOnly) {
+    if (side === 'BUY') {
+      if (params.limitPrice >= quoteCheck.quote.ask) {
+        return makeRejected(
+          `Post-only BUY limitPrice ${params.limitPrice.toFixed(4)} crosses or meets ask ${quoteCheck.quote.ask.toFixed(4)}.`,
+        )
+      }
+      if (limitPrice >= quoteCheck.quote.ask) {
+        const steppedDown = roundPriceToTick(
+          quoteCheck.quote.ask - tick,
+          tickSize,
+        )
+        if (
+          quoteCheck.quote.ask - tick < tick - 1e-12 ||
+          steppedDown >= quoteCheck.quote.ask
+        ) {
+          return makeRejected(
+            `Post-only BUY rounded price ${limitPrice.toFixed(4)} cannot sit passively below ask ${quoteCheck.quote.ask.toFixed(4)} at tickSize ${tickSize}.`,
+          )
+        }
+        limitPrice = steppedDown
+      }
+    } else {
+      if (params.limitPrice <= quoteCheck.quote.bid) {
+        return makeRejected(
+          `Post-only SELL limitPrice ${params.limitPrice.toFixed(4)} crosses or meets bid ${quoteCheck.quote.bid.toFixed(4)}.`,
+        )
+      }
+      if (limitPrice <= quoteCheck.quote.bid) {
+        const steppedUp = roundPriceToTick(
+          quoteCheck.quote.bid + tick,
+          tickSize,
+        )
+        if (
+          quoteCheck.quote.bid + tick > 1 - tick + 1e-12 ||
+          steppedUp <= quoteCheck.quote.bid
+        ) {
+          return makeRejected(
+            `Post-only SELL rounded price ${limitPrice.toFixed(4)} cannot sit passively above bid ${quoteCheck.quote.bid.toFixed(4)} at tickSize ${tickSize}.`,
+          )
+        }
+        limitPrice = steppedUp
+      }
+    }
+  }
+
+  const shares =
+    limitPrice > 0
+      ? Number((effectiveStakeUsd / limitPrice).toFixed(4))
+      : 0
+  if (shares <= 0) {
+    return makeRejected('Computed share size must be greater than 0.')
+  }
+
+  // Makers pay $0 upfront fee (doubleEntryLedger forbids negative postings)
+  const feeUsd = 0
+  const sdkSide = side === 'SELL' ? Side.SELL : Side.BUY
+  const options: Partial<CreateOrderOptions> = {
+    tickSize,
+    negRisk: Boolean(quoteCheck.quote.negRisk),
+  }
+
+  // 5. Sign & submit GTC postOnly order via Polymarket CLOB client
+  try {
+    const client = await resolveClobClient()
+    const limitOrder: UserOrder = {
+      tokenID: tokenId,
+      price: limitPrice,
+      size: shares,
+      side: sdkSide,
+    }
+    const resp = await client.createAndPostOrder(
+      limitOrder,
+      options,
+      OrderType.GTC,
+      false,
+      postOnly,
+    )
+
+    if (!resp || resp.success === false || !resp.orderID) {
+      return makeRejected(
+        `Polymarket CLOB rejected maker order: ${resp?.errorMsg || 'Missing order acknowledgment'}`,
+      )
+    }
+
+    const rawStatus = String(resp.status ?? '').toUpperCase()
+    const status: PolymarketOrderStatus =
+      rawStatus === 'MATCHED' || rawStatus === 'FILLED' ? 'MATCHED' : 'LIVE'
+
+    const acceptedOrder: PolymarketOrderRecord = {
+      id: nextId(),
+      clientOrderId: params.clientOrderId,
+      venueOrderId: String(resp.orderID),
+      timestamp: new Date(nowMs).toISOString(),
+      tenantId,
+      instrumentId: quoteCheck.quote.instrumentId,
+      tokenId,
+      outcome: quoteCheck.quote.outcome,
+      side,
+      orderType: 'GTC',
+      limitPrice,
+      shares,
+      stakeUsd: Number(effectiveStakeUsd.toFixed(2)),
+      feeUsd,
+      status,
+      source,
+      transactionHashes: Array.isArray(resp.transactionsHashes)
+        ? resp.transactionsHashes
+        : undefined,
+      reason: `Polymarket CLOB maker ${status} (#${resp.orderID})`,
+    }
+    recordPolymarketOrder(state, acceptedOrder, source)
+    recordExternalVenueOrderCount(tenantId)
+
+    // 6. Post balanced double-entry accounting entry on BUY stake
+    if (side === 'BUY') {
+      appendTenantLedgerEntry(
+        tenantId,
+        buildPredictionStakeEntry({
+          tenantId,
+          ticketId: acceptedOrder.id,
+          stakeUsd: acceptedOrder.stakeUsd,
+          feeUsd: 0,
+          instrumentId: acceptedOrder.instrumentId,
+        }),
+      )
+    }
+
+    return { ok: true, order: acceptedOrder }
+  } catch (err) {
+    return makeRejected(
+      `Polymarket CLOB maker submission failed: ${err instanceof Error ? err.message : String(err)}`,
+    )
+  }
+}
+
+export type SyncPolymarketOrderStatusesResult = {
+  syncedCount: number
+  matchedOrderIds: string[]
+}
+
+function extractMatchedVenueOrderIds(
+  openOrders: readonly OpenOrder[],
+  trades: readonly Trade[],
+): {
+  matchedIds: Set<string>
+  txHashesByOrderId: Map<string, string[]>
+} {
+  const matchedIds = new Set<string>()
+  const txHashesByOrderId = new Map<string, string[]>()
+
+  const addTxHash = (orderId: string, txHash: string | undefined) => {
+    if (!txHash) return
+    const existing = txHashesByOrderId.get(orderId) ?? []
+    if (!existing.includes(txHash)) {
+      existing.push(txHash)
+      txHashesByOrderId.set(orderId, existing)
+    }
+  }
+
+  for (const trade of trades) {
+    const statusUpper = String(trade.status ?? '').toUpperCase()
+    if (statusUpper === 'FAILED' || statusUpper === 'CANCELED') {
+      continue
+    }
+    const txHash =
+      typeof trade.transaction_hash === 'string' && trade.transaction_hash
+        ? trade.transaction_hash
+        : undefined
+
+    if (typeof trade.taker_order_id === 'string' && trade.taker_order_id) {
+      matchedIds.add(trade.taker_order_id)
+      addTxHash(trade.taker_order_id, txHash)
+    }
+    if (Array.isArray(trade.maker_orders)) {
+      for (const mo of trade.maker_orders) {
+        const raw = mo as unknown as Record<string, unknown>
+        const makerOrderId =
+          (typeof raw.order_id === 'string' && raw.order_id) ||
+          (typeof raw.orderID === 'string' && raw.orderID) ||
+          (typeof raw.id === 'string' && raw.id) ||
+          ''
+        if (makerOrderId) {
+          matchedIds.add(makerOrderId)
+          addTxHash(makerOrderId, txHash)
+        }
+      }
+    }
+  }
+
+  for (const openOrder of openOrders) {
+    const statusUpper = String(openOrder.status ?? '').toUpperCase()
+    const orig = Number(openOrder.original_size)
+    const matched = Number(openOrder.size_matched)
+    const fullyFilled =
+      Number.isFinite(orig) &&
+      orig > 0 &&
+      Number.isFinite(matched) &&
+      matched >= orig - 1e-9
+    if (
+      openOrder.id &&
+      (statusUpper === 'MATCHED' || statusUpper === 'FILLED' || fullyFilled)
+    ) {
+      matchedIds.add(openOrder.id)
+    }
+  }
+
+  return { matchedIds, txHashesByOrderId }
+}
+
+async function applyMatchedOrderStatuses(
+  tenantId: string,
+  openOrders: readonly OpenOrder[],
+  trades: readonly Trade[],
+): Promise<SyncPolymarketOrderStatusesResult> {
+  const cleanTenant = tenantId.trim() || DEFAULT_TENANT_ID
+  const { matchedIds, txHashesByOrderId } = extractMatchedVenueOrderIds(
+    openOrders,
+    trades,
+  )
+  if (matchedIds.size === 0) {
+    return { syncedCount: 0, matchedOrderIds: [] }
+  }
+
+  const state = getTenantPolyState(cleanTenant)
+  const syncedVenueIds = new Set<string>()
+  const matchedOrderIds: string[] = []
+
+  const liveLocalIds = state.orders
+    .filter(
+      (o) =>
+        o.status === 'LIVE' &&
+        Boolean(o.venueOrderId) &&
+        matchedIds.has(o.venueOrderId!),
+    )
+    .map((o) => o.id)
+
+  for (const localId of liveLocalIds) {
+    const freshIndex = state.orders.findIndex((o) => o.id === localId)
+    if (freshIndex < 0) continue
+    const current = state.orders[freshIndex]
+    if (current.status !== 'LIVE' || !current.venueOrderId) continue
+    if (!matchedIds.has(current.venueOrderId)) continue
+
+    const txHashes = txHashesByOrderId.get(current.venueOrderId)
+    const updated: PolymarketOrderRecord = {
+      ...current,
+      status: 'MATCHED',
+      transactionHashes:
+        txHashes && txHashes.length > 0
+          ? Array.from(
+              new Set([...(current.transactionHashes ?? []), ...txHashes]),
+            )
+          : current.transactionHashes,
+      reason: `Polymarket CLOB MATCHED (#${current.venueOrderId})`,
+    }
+    state.orders[freshIndex] = updated
+    await persistOrderToStore(updated)
+    if (!syncedVenueIds.has(current.venueOrderId)) {
+      syncedVenueIds.add(current.venueOrderId)
+      matchedOrderIds.push(current.venueOrderId)
+    }
+  }
+
+  try {
+    const sqlOrders = await getStateStore().getOrders(cleanTenant, 1_000)
+    for (const sqlOrder of sqlOrders) {
+      if (
+        sqlOrder.status === 'LIVE' &&
+        sqlOrder.venueOrderId &&
+        matchedIds.has(sqlOrder.venueOrderId)
+      ) {
+        const updatedSql: ExchangeOrderRecord = {
+          ...sqlOrder,
+          status: 'FILLED',
+          reason: `Polymarket CLOB MATCHED (#${sqlOrder.venueOrderId})`,
+        }
+        await getStateStore().appendOrder(cleanTenant, updatedSql)
+        if (!syncedVenueIds.has(sqlOrder.venueOrderId)) {
+          syncedVenueIds.add(sqlOrder.venueOrderId)
+          matchedOrderIds.push(sqlOrder.venueOrderId)
+        }
+      }
+    }
+  } catch {
+    // SQL persistence errors must not break caller
+  }
+
+  return {
+    syncedCount: matchedOrderIds.length,
+    matchedOrderIds,
+  }
+}
+
+/**
+ * Polls Polymarket CLOB open orders and trades to transition matched resting
+ * GTC `LIVE` orders to `'MATCHED'` in memory and `'FILLED'` in SQL storage.
+ */
+export async function syncPolymarketOrderStatuses(
+  tenantId = DEFAULT_TENANT_ID,
+): Promise<SyncPolymarketOrderStatusesResult> {
+  if (!isPolymarketConfigured()) {
+    return { syncedCount: 0, matchedOrderIds: [] }
+  }
+  let client: PolymarketClobClientLike
+  try {
+    client = await resolveClobClient()
+  } catch {
+    return { syncedCount: 0, matchedOrderIds: [] }
+  }
+
+  let openOrders: OpenOrder[] = []
+  let trades: Trade[] = []
+  try {
+    if (typeof client.getOpenOrders === 'function') {
+      const res = await client.getOpenOrders()
+      if (Array.isArray(res)) openOrders = res
+    }
+  } catch {
+    // Ignore transient openOrders fetch failure
+  }
+  try {
+    if (typeof client.getTrades === 'function') {
+      const res = await client.getTrades()
+      if (Array.isArray(res)) trades = res
+    }
+  } catch {
+    // Ignore transient trades fetch failure
+  }
+
+  return applyMatchedOrderStatuses(tenantId, openOrders, trades)
+}
+
+export async function cancelOrdersForWindow(
+  tenantId: string,
+  instrumentId: string,
+  options?: {
+    reason?: string
+    conditionId?: string
+    tokenIds?: readonly string[]
+  },
+): Promise<CancelOrdersForWindowResult> {
+  const cleanTenant = tenantId.trim() || DEFAULT_TENANT_ID
+  const cleanInstrument = instrumentId.trim()
+  if (!cleanInstrument) {
+    return {
+      ok: true,
+      canceledCount: 0,
+      canceledOrderIds: [],
+      failedOrderIds: [],
+    }
+  }
+
+  const state = getTenantPolyState(cleanTenant)
+  const cancelReason = options?.reason ?? 'Window cancellation sweep'
+
+  const seenVenueIds = new Set<string>()
+  const targets: { venueOrderId: string; localOrderId: string | null }[] = []
+
+  for (const o of state.orders) {
+    if (
+      o.instrumentId === cleanInstrument &&
+      o.status === 'LIVE' &&
+      o.venueOrderId
+    ) {
+      if (!seenVenueIds.has(o.venueOrderId)) {
+        seenVenueIds.add(o.venueOrderId)
+        targets.push({ venueOrderId: o.venueOrderId, localOrderId: o.id })
+      }
+    }
+  }
+
+  const hasRemoteFilter =
+    Boolean(options?.conditionId) ||
+    Boolean(options?.tokenIds && options.tokenIds.length > 0)
+
+  if (
+    targets.length === 0 &&
+    (!hasRemoteFilter || !isPolymarketConfigured())
+  ) {
+    return {
+      ok: true,
+      canceledCount: 0,
+      canceledOrderIds: [],
+      failedOrderIds: [],
+    }
+  }
+
+  if (!isPolymarketConfigured()) {
+    return {
+      ok: false,
+      canceledCount: 0,
+      canceledOrderIds: [],
+      failedOrderIds: targets.map((t) => t.venueOrderId),
+      error: 'Polymarket CLOB signer not configured.',
+    }
+  }
+
+  let client: PolymarketClobClientLike
+  try {
+    client = await resolveClobClient()
+  } catch (err) {
+    return {
+      ok: false,
+      canceledCount: 0,
+      canceledOrderIds: [],
+      failedOrderIds: targets.map((t) => t.venueOrderId),
+      error: err instanceof Error ? err.message : String(err),
+    }
+  }
+
+  if (hasRemoteFilter) {
+    try {
+      const openOrders = await client.getOpenOrders()
+      const tokenSet = new Set(options?.tokenIds ?? [])
+      for (const remote of openOrders ?? []) {
+        const matchesCondition =
+          Boolean(options?.conditionId) &&
+          remote.market === options?.conditionId
+        const matchesToken = tokenSet.has(remote.asset_id)
+        if (
+          (matchesCondition || matchesToken) &&
+          remote.id &&
+          !seenVenueIds.has(remote.id)
+        ) {
+          seenVenueIds.add(remote.id)
+          targets.push({
+            venueOrderId: remote.id,
+            localOrderId: null,
+          })
+        }
+      }
+    } catch {
+      // Fall back to tracked local orders if getOpenOrders fails
+    }
+  }
+
+  if (targets.length === 0) {
+    return {
+      ok: true,
+      canceledCount: 0,
+      canceledOrderIds: [],
+      failedOrderIds: [],
+    }
+  }
+
+  const canceledOrderIds: string[] = []
+  const failedOrderIds: string[] = []
+  let firstError: string | undefined
+
+  for (const target of targets) {
+    try {
+      await client.cancelOrder({ orderID: target.venueOrderId })
+      canceledOrderIds.push(target.venueOrderId)
+
+      // Resolve index fresh after await so concurrent prepends cannot shift indices
+      const freshIndex = state.orders.findIndex(
+        (o) =>
+          (target.localOrderId !== null && o.id === target.localOrderId) ||
+          o.venueOrderId === target.venueOrderId,
+      )
+
+      if (freshIndex >= 0) {
+        const current = state.orders[freshIndex]
+        if (current.status === 'LIVE') {
+          const updated: PolymarketOrderRecord = {
+            ...current,
+            status: 'CANCELED',
+            reason: cancelReason,
+          }
+          state.orders[freshIndex] = updated
+          if (current.side === 'BUY' && current.stakeUsd > 0) {
+            releaseCanceledBuyEscrow({
+              tenantId: cleanTenant,
+              orderId: updated.id,
+              instrumentId: updated.instrumentId,
+              stakeUsd: updated.stakeUsd,
+              reason: cancelReason,
+            })
+          }
+          await persistOrderToStore(updated)
+        }
+      } else {
+        await withTenantSqlCancelLock(cleanTenant, async () => {
+          try {
+            const persistedOrders = await getStateStore().getOrders(
+              cleanTenant,
+              1_000,
+            )
+            const persisted = persistedOrders.find(
+              (o) => o.venueOrderId === target.venueOrderId,
+            )
+            if (
+              persisted &&
+              persisted.status === 'LIVE' &&
+              !state.releasedCanceledEscrowOrderIds.has(persisted.id)
+            ) {
+              const updatedPersisted: ExchangeOrderRecord = {
+                ...persisted,
+                status: 'CANCELED_KILLSWITCH',
+                reason: cancelReason,
+              }
+              await getStateStore().appendOrder(cleanTenant, updatedPersisted)
+
+              if (persisted.side === 'BUY' && persisted.notionalUsd > 0) {
+                const instId = persisted.pair.split('/')[0] || cleanInstrument
+                releaseCanceledBuyEscrow({
+                  tenantId: cleanTenant,
+                  orderId: persisted.id,
+                  instrumentId: instId,
+                  stakeUsd: persisted.notionalUsd,
+                  reason: cancelReason,
+                })
+              }
+            }
+          } catch {
+            // Store lookup/update errors must not mask CLOB cancellation result
+          }
+        })
+      }
+    } catch (err) {
+      failedOrderIds.push(target.venueOrderId)
+      if (!firstError) {
+        firstError = err instanceof Error ? err.message : String(err)
+      }
+    }
+  }
+
+  return {
+    ok: failedOrderIds.length === 0,
+    canceledCount: canceledOrderIds.length,
+    canceledOrderIds,
+    failedOrderIds,
+    ...(firstError ? { error: firstError } : {}),
+  }
+}
+
 export async function cancelPolymarketOrder(
   orderId: string,
   tenantId = DEFAULT_TENANT_ID,
@@ -672,15 +1470,75 @@ export async function cancelPolymarketOrder(
   if (!isPolymarketConfigured()) {
     return { ok: false, error: 'Polymarket CLOB signer not configured.' }
   }
+  const cleanTenant = tenantId.trim() || DEFAULT_TENANT_ID
   try {
     const client = await resolveClobClient()
     await client.cancelOrder({ orderID: orderId })
-    const state = getTenantPolyState(tenantId)
-    state.orders = state.orders.map((o) =>
-      o.venueOrderId === orderId || o.id === orderId
-        ? { ...o, status: 'CANCELED', reason: 'Canceled by operator' }
-        : o,
-    )
+    const state = getTenantPolyState(cleanTenant)
+    const cancelReason = 'Canceled by operator'
+    const matchingIds = state.orders
+      .filter((o) => o.venueOrderId === orderId || o.id === orderId)
+      .map((o) => o.id)
+
+    for (const targetId of matchingIds) {
+      const freshIndex = state.orders.findIndex((o) => o.id === targetId)
+      if (freshIndex < 0) continue
+      const current = state.orders[freshIndex]
+      const wasLive = current.status === 'LIVE'
+      if (current.status === 'MATCHED') continue
+      const updated: PolymarketOrderRecord = {
+        ...current,
+        status: 'CANCELED',
+        reason: cancelReason,
+      }
+      state.orders[freshIndex] = updated
+      if (wasLive && current.side === 'BUY' && current.stakeUsd > 0) {
+        releaseCanceledBuyEscrow({
+          tenantId: cleanTenant,
+          orderId: updated.id,
+          instrumentId: updated.instrumentId,
+          stakeUsd: updated.stakeUsd,
+          reason: cancelReason,
+        })
+      }
+      await persistOrderToStore(updated)
+    }
+
+    if (matchingIds.length === 0) {
+      await withTenantSqlCancelLock(cleanTenant, async () => {
+        try {
+          const persistedOrders = await getStateStore().getOrders(
+            cleanTenant,
+            1_000,
+          )
+          const persisted = persistedOrders.find(
+            (o) => o.venueOrderId === orderId || o.id === orderId,
+          )
+          if (
+            persisted &&
+            persisted.status === 'LIVE' &&
+            !state.releasedCanceledEscrowOrderIds.has(persisted.id)
+          ) {
+            await getStateStore().appendOrder(cleanTenant, {
+              ...persisted,
+              status: 'CANCELED_KILLSWITCH',
+              reason: cancelReason,
+            })
+            if (persisted.side === 'BUY' && persisted.notionalUsd > 0) {
+              releaseCanceledBuyEscrow({
+                tenantId: cleanTenant,
+                orderId: persisted.id,
+                instrumentId: persisted.pair.split('/')[0] || persisted.pair,
+                stakeUsd: persisted.notionalUsd,
+                reason: cancelReason,
+              })
+            }
+          }
+        } catch {
+          // Ignore store lookup failure
+        }
+      })
+    }
     return { ok: true }
   } catch (err) {
     return {
@@ -697,15 +1555,75 @@ export async function cancelAllPolymarketOrders(
   if (!isPolymarketConfigured()) {
     return { ok: true, canceled: false }
   }
+  const cleanTenant = tenantId.trim() || DEFAULT_TENANT_ID
   try {
     const client = await resolveClobClient()
     await client.cancelAll()
-    const state = getTenantPolyState(tenantId)
-    state.orders = state.orders.map((o) =>
-      o.status === 'LIVE'
-        ? { ...o, status: 'CANCELED', reason: `CANCELED: ${reason}` }
-        : o,
-    )
+    const state = getTenantPolyState(cleanTenant)
+    const cancelReason = `CANCELED: ${reason}`
+    const liveIds = state.orders
+      .filter((o) => o.status === 'LIVE')
+      .map((o) => o.id)
+    const handledOrderIds = new Set<string>()
+
+    for (const targetId of liveIds) {
+      const freshIndex = state.orders.findIndex((o) => o.id === targetId)
+      if (freshIndex < 0) continue
+      const current = state.orders[freshIndex]
+      if (current.status !== 'LIVE') continue
+      const updated: PolymarketOrderRecord = {
+        ...current,
+        status: 'CANCELED',
+        reason: cancelReason,
+      }
+      state.orders[freshIndex] = updated
+      handledOrderIds.add(updated.id)
+      if (current.side === 'BUY' && current.stakeUsd > 0) {
+        releaseCanceledBuyEscrow({
+          tenantId: cleanTenant,
+          orderId: updated.id,
+          instrumentId: updated.instrumentId,
+          stakeUsd: updated.stakeUsd,
+          reason: cancelReason,
+        })
+      }
+      await persistOrderToStore(updated)
+    }
+
+    await withTenantSqlCancelLock(cleanTenant, async () => {
+      try {
+        const persistedOrders = await getStateStore().getOrders(
+          cleanTenant,
+          1_000,
+        )
+        for (const persisted of persistedOrders) {
+          if (
+            persisted.mode === 'polymarket-clob' &&
+            persisted.status === 'LIVE' &&
+            !handledOrderIds.has(persisted.id) &&
+            !state.releasedCanceledEscrowOrderIds.has(persisted.id)
+          ) {
+            await getStateStore().appendOrder(cleanTenant, {
+              ...persisted,
+              status: 'CANCELED_KILLSWITCH',
+              reason: cancelReason,
+            })
+            if (persisted.side === 'BUY' && persisted.notionalUsd > 0) {
+              releaseCanceledBuyEscrow({
+                tenantId: cleanTenant,
+                orderId: persisted.id,
+                instrumentId: persisted.pair.split('/')[0] || persisted.pair,
+                stakeUsd: persisted.notionalUsd,
+                reason: cancelReason,
+              })
+            }
+          }
+        }
+      } catch {
+        // Ignore store lookup failure
+      }
+    })
+
     return { ok: true, canceled: true }
   } catch (err) {
     return {
@@ -729,6 +1647,8 @@ export async function reconcilePolymarketAccount(
     client.getOpenOrders(),
     client.getTrades(),
   ])
+
+  await applyMatchedOrderStatuses(tenantId, openOrders ?? [], trades ?? [])
 
   const snapshot: PolymarketReconciliationSnapshot = {
     syncedAt: new Date().toISOString(),

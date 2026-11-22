@@ -1,16 +1,19 @@
-import { useState, type PointerEvent as ReactPointerEvent } from 'react'
+import { useId, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import './EquityChart.css'
 import { useElementWidth } from '../hooks/useElementWidth'
 import { niceTicks } from '../chart'
 import { formatMoney, formatMoneyWhole, formatSignedMoney } from '../format'
 import { useI18n } from '../i18n'
+import { cn } from '@/lib/utils'
 import type { ChartPoint } from '../types'
 
 type EquityChartProps = {
   points: ChartPoint[]
+  height?: number
+  className?: string
 }
 
-const HEIGHT = 260
+const DEFAULT_HEIGHT = 260
 const MARGIN = { top: 16, right: 16, bottom: 28, left: 72 }
 
 function changeClass(change: number): string {
@@ -19,14 +22,19 @@ function changeClass(change: number): string {
   return ''
 }
 
-function EquityChart({ points }: EquityChartProps) {
+function EquityChart({
+  points,
+  height = DEFAULT_HEIGHT,
+  className,
+}: EquityChartProps) {
   const { t } = useI18n()
+  const gradientId = useId()
   const [containerRef, width] = useElementWidth<HTMLDivElement>()
   const [activeIndex, setActiveIndex] = useState<number | null>(null)
 
   if (points.length < 2) {
     return (
-      <div className="chart" ref={containerRef}>
+      <div className={cn('chart', className)} ref={containerRef}>
         <p className="chart__empty">
           {t('chart.needPoints')}
         </p>
@@ -41,7 +49,7 @@ function EquityChart({ points }: EquityChartProps) {
   const yMax = ticks[ticks.length - 1]
 
   const plotWidth = Math.max(0, width - MARGIN.left - MARGIN.right)
-  const plotHeight = HEIGHT - MARGIN.top - MARGIN.bottom
+  const plotHeight = height - MARGIN.top - MARGIN.bottom
   const yBottom = MARGIN.top + plotHeight
 
   function xOf(index: number): number {
@@ -68,7 +76,7 @@ function EquityChart({ points }: EquityChartProps) {
   }
 
   return (
-    <div className="chart" ref={containerRef}>
+    <div className={cn('chart', className)} ref={containerRef}>
       <p className="chart__readout">
         <strong>{formatMoney(shown.value)}</strong>
         <span className={changeClass(change)}>{formatSignedMoney(change)}</span>
@@ -79,8 +87,8 @@ function EquityChart({ points }: EquityChartProps) {
         <svg
           className="chart__svg"
           width={width}
-          height={HEIGHT}
-          viewBox={`0 0 ${width} ${HEIGHT}`}
+          height={height}
+          viewBox={`0 0 ${width} ${height}`}
           role="img"
           aria-label={t('chart.equityAria', {
             from: formatMoney(points[0].value),
@@ -92,7 +100,7 @@ function EquityChart({ points }: EquityChartProps) {
           onPointerLeave={() => setActiveIndex(null)}
         >
           <defs>
-            <linearGradient id="equity-fill" x1="0" y1="0" x2="0" y2="1">
+            <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" className="chart__stop--top" />
               <stop offset="100%" className="chart__stop--bottom" />
             </linearGradient>
@@ -127,13 +135,13 @@ function EquityChart({ points }: EquityChartProps) {
             y2={yOf(points[0].value)}
           />
 
-          <path className="chart__area" fill="url(#equity-fill)" d={areaPath} />
+          <path className="chart__area" fill={`url(#${gradientId})`} d={areaPath} />
           <polyline className="chart__line" points={linePoints} />
 
           <text
             className="chart__label"
             x={xOf(0)}
-            y={HEIGHT - 8}
+            y={height - 8}
             textAnchor="start"
           >
             {points[0].label}
@@ -141,7 +149,7 @@ function EquityChart({ points }: EquityChartProps) {
           <text
             className="chart__label"
             x={xOf(lastIndex)}
-            y={HEIGHT - 8}
+            y={height - 8}
             textAnchor="end"
           >
             {points[lastIndex].label}

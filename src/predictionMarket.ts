@@ -313,7 +313,7 @@ function computeBaseRate(
   return total > 0 ? yes / total : 0.5
 }
 
-type RuleMarketStats = {
+export type RuleMarketStats = {
   ruleId: string
   number: number
   title: string

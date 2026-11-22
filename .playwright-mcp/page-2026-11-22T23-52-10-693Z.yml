@@ -1,0 +1,240 @@
+- generic [ref=e1]:
+  - generic [ref=e3]:
+    - banner [ref=e4]:
+      - generic [ref=e6]:
+        - generic [ref=e7]: FLARE
+        - generic [aria-hidden] [ref=e12]: /
+        - generic [ref=e13]: Dashboard
+    - main [ref=e14]:
+      - generic [ref=e15]:
+        - generic [ref=e16]:
+          - heading "FLARE" [level=1] [ref=e17]
+          - generic [ref=e18]:
+            - button "Charts" [ref=e19] [cursor=pointer]
+            - button "Run Bot" [ref=e21] [cursor=pointer]
+        - generic [ref=e23]:
+          - generic [ref=e24]:
+            - generic [ref=e25]: Balance
+            - strong [ref=e26]: —
+            - generic [ref=e27]:
+              - generic [ref=e28]:
+                - text: Avail.
+                - strong [ref=e29]: —
+              - generic [ref=e30]: —
+          - generic [ref=e31]:
+            - generic [ref=e32]:
+              - generic [ref=e33]: P & L
+              - generic [ref=e34]: ...
+            - strong [ref=e35]: —
+            - generic [ref=e37]:
+              - generic [ref=e38]:
+                - text: Day
+                - strong [ref=e39]: —
+              - generic [ref=e40]:
+                - text: ROI
+                - strong [ref=e41]: —
+          - generic [ref=e42]:
+            - generic [ref=e43]:
+              - generic [ref=e44]: Win Rate
+              - generic [ref=e45]: 0 ops
+            - strong [ref=e46]: —
+            - generic [ref=e47]:
+              - generic [ref=e48]: 0W · 0L
+              - generic [ref=e49]: $0.00
+          - generic [ref=e50]:
+            - generic [ref=e51]:
+              - generic [ref=e52]: Bot Status
+              - generic [ref=e53]: STOPPED
+            - strong [ref=e54]: BTC/USDT
+            - generic [ref=e55]:
+              - generic [ref=e56]:
+                - text: SL/TP
+                - strong [ref=e57]: 2%/4%
+              - generic [ref=e58]:
+                - text: Cap
+                - strong [ref=e59]: 3%
+        - generic [ref=e60]:
+          - generic [ref=e61]:
+            - heading "Markets (15m)" [level=2] [ref=e62]
+            - generic [ref=e63]:
+              - tablist "Mini chart timeframe" [ref=e65]:
+                - tab "5m" [ref=e66] [cursor=pointer]
+                - tab "15m" [selected] [ref=e67] [cursor=pointer]
+                - tab "1h" [ref=e68] [cursor=pointer]
+                - tab "4h" [ref=e69] [cursor=pointer]
+                - tab "1d" [ref=e70] [cursor=pointer]
+              - button "Refresh markets" [ref=e71] [cursor=pointer]
+          - generic [ref=e72]:
+            - button "BTC/USDT +0.38% Open full chart for BTC/USDT $61,296.95 L 60,464.01·H 61,669.99" [pressed] [ref=e257] [cursor=pointer]:
+              - generic [ref=e74]:
+                - generic [ref=e75]:
+                  - generic [ref=e76]: BTC/USDT
+                  - generic [ref=e79]:
+                    - generic [ref=e80]: +0.38%
+                    - button "Open full chart for BTC/USDT" [ref=e81]
+                - generic [ref=e87]: $61,296.95
+              - generic [ref=e90]: L 60,464.01·H 61,669.99
+            - button "ETH/USDT +0.83% Open full chart for ETH/USDT $1,722.70 L 1,695.76·H 1,732.52" [ref=e261] [cursor=pointer]:
+              - generic [ref=e93]:
+                - generic [ref=e94]:
+                  - generic [ref=e95]: ETH/USDT
+                  - generic [ref=e97]:
+                    - generic [ref=e98]: +0.83%
+                    - button "Open full chart for ETH/USDT" [ref=e99]
+                - generic [ref=e105]: $1,722.70
+              - generic [ref=e108]: L 1,695.76·H 1,732.52
+            - button "SOL/USDT +0.03% Open full chart for SOL/USDT $70.67 L 69.78·H 71.43" [ref=e265] [cursor=pointer]:
+              - generic [ref=e111]:
+                - generic [ref=e112]:
+                  - generic [ref=e113]: SOL/USDT
+                  - generic [ref=e115]:
+                    - generic [ref=e116]: +0.03%
+                    - button "Open full chart for SOL/USDT" [ref=e117]
+                - generic [ref=e123]: $70.67
+              - generic [ref=e126]: L 69.78·H 71.43
+            - button "XRP/USDT +0.01% Open full chart for XRP/USDT $0.9286 L 0.9183·H 0.9375" [ref=e269] [cursor=pointer]:
+              - generic [ref=e129]:
+                - generic [ref=e130]:
+                  - generic [ref=e131]: XRP/USDT
+                  - generic [ref=e133]:
+                    - generic [ref=e134]: +0.01%
+                    - button "Open full chart for XRP/USDT" [ref=e135]
+                - generic [ref=e141]: $0.9286
+              - generic [ref=e144]: L 0.9183·H 0.9375
+            - button "DOGE/USDT -0.07% Open full chart for DOGE/USDT $0.0554 L 0.0547·H 0.0560" [ref=e273] [cursor=pointer]:
+              - generic [ref=e147]:
+                - generic [ref=e148]:
+                  - generic [ref=e149]: DOGE/USDT
+                  - generic [ref=e151]:
+                    - generic [ref=e152]: "-0.07%"
+                    - button "Open full chart for DOGE/USDT" [ref=e153]
+                - generic [ref=e159]: $0.0554
+              - generic [ref=e162]: L 0.0547·H 0.0560
+        - generic [ref=e164]:
+          - generic [ref=e165]:
+            - generic [ref=e166]:
+              - generic [ref=e167]: Predictive Options · BTC/USDT (15m)
+              - generic [ref=e168]:
+                - tablist "Prediction timeframe" [ref=e170]:
+                  - tab "5m" [ref=e171] [cursor=pointer]
+                  - tab "15m" [selected] [ref=e172] [cursor=pointer]
+                  - tab "1h" [ref=e173] [cursor=pointer]
+                  - tab "4h" [ref=e174] [cursor=pointer]
+                  - tab "1d" [ref=e175] [cursor=pointer]
+                - button "View 20" [ref=e176] [cursor=pointer]
+            - generic [ref=e280]:
+              - 'button "#6 YES +2b ACTIVE Inside Bar breakout within 30 min (15m) WR 96.5% Wilson 90.2% $0.97 Kelly 20.1% 83/86 Inside Bar breakout within 30 min (15m): 83 / 86" [ref=e281] [cursor=pointer]':
+                - generic [ref=e282]:
+                  - generic [ref=e283]:
+                    - generic [ref=e284]: "#6"
+                    - generic [ref=e285]: YES +2b
+                    - generic [ref=e286]: ACTIVE
+                    - generic [ref=e287]: Inside Bar breakout within 30 min (15m)
+                  - generic [ref=e288]:
+                    - generic [ref=e289]:
+                      - text: WR
+                      - strong [ref=e290]: 96.5%
+                    - generic [ref=e291]:
+                      - text: Wilson
+                      - strong [ref=e292]: 90.2%
+                    - strong [ref=e294]: $0.97
+                    - generic [ref=e295]:
+                      - text: Kelly
+                      - strong [ref=e296]: 20.1%
+                    - generic [ref=e297]: 83/86
+                - 'img "Inside Bar breakout within 30 min (15m): 83 / 86" [ref=e299]'
+              - 'button "#5 YES +1b Cap below SMA 20 with RSI < 45 (15m) WR 95.3% Wilson 91.1% $0.95 Kelly 20.5% 164/172 Cap below SMA 20 with RSI < 45 (15m): 164 / 172" [ref=e319] [cursor=pointer]':
+                - generic [ref=e320]:
+                  - generic [ref=e321]:
+                    - generic [ref=e322]: "#5"
+                    - generic [ref=e323]: YES +1b
+                    - generic [ref=e324]: Cap below SMA 20 with RSI < 45 (15m)
+                  - generic [ref=e325]:
+                    - generic [ref=e326]:
+                      - text: WR
+                      - strong [ref=e327]: 95.3%
+                    - generic [ref=e328]:
+                      - text: Wilson
+                      - strong [ref=e329]: 91.1%
+                    - strong [ref=e331]: $0.95
+                    - generic [ref=e332]:
+                      - text: Kelly
+                      - strong [ref=e333]: 20.5%
+                    - generic [ref=e334]: 164/172
+                - 'img "Cap below SMA 20 with RSI < 45 (15m): 164 / 172" [ref=e336]'
+              - 'button "#7 YES +1b Bearish follow-through after bottom-15% close (15m) WR 94.1% Wilson 80.9% $0.94 Kelly 15.5% 32/34 Bearish follow-through after bottom-15% close (15m): 32 / 34" [ref=e356] [cursor=pointer]':
+                - generic [ref=e357]:
+                  - generic [ref=e358]:
+                    - generic [ref=e359]: "#7"
+                    - generic [ref=e360]: YES +1b
+                    - generic [ref=e361]: Bearish follow-through after bottom-15% close (15m)
+                  - generic [ref=e362]:
+                    - generic [ref=e363]:
+                      - text: WR
+                      - strong [ref=e364]: 94.1%
+                    - generic [ref=e365]:
+                      - text: Wilson
+                      - strong [ref=e366]: 80.9%
+                    - strong [ref=e368]: $0.94
+                    - generic [ref=e369]:
+                      - text: Kelly
+                      - strong [ref=e370]: 15.5%
+                    - generic [ref=e371]: 32/34
+                - 'img "Bearish follow-through after bottom-15% close (15m): 32 / 34" [ref=e373]'
+              - 'button "#8 YES +4b Technical bounce >= +0.30% after RSI < 28 oversold (15m) WR 74.3% Wilson 57.9% $0.74 Kelly 3.9% 26/35 Technical bounce >= +0.30% after RSI < 28 oversold (15m): 26 / 35" [ref=e393] [cursor=pointer]':
+                - generic [ref=e394]:
+                  - generic [ref=e395]:
+                    - generic [ref=e396]: "#8"
+                    - generic [ref=e397]: YES +4b
+                    - generic [ref=e398]: Technical bounce >= +0.30% after RSI < 28 oversold (15m)
+                  - generic [ref=e399]:
+                    - generic [ref=e400]:
+                      - text: WR
+                      - strong [ref=e401]: 74.3%
+                    - generic [ref=e402]:
+                      - text: Wilson
+                      - strong [ref=e403]: 57.9%
+                    - strong [ref=e405]: $0.74
+                    - generic [ref=e406]:
+                      - text: Kelly
+                      - strong [ref=e407]: 3.9%
+                    - generic [ref=e408]: 26/35
+                - 'img "Technical bounce >= +0.30% after RSI < 28 oversold (15m): 26 / 35" [ref=e410]'
+          - generic [ref=e184]:
+            - generic [ref=e185]:
+              - generic [ref=e186]: Executed Win-Rate History
+              - button "Statistics" [ref=e187] [cursor=pointer]
+            - generic [ref=e189]:
+              - generic [ref=e190]:
+                - generic [ref=e191]:
+                  - generic [ref=e192]: OPS
+                  - strong [ref=e193]: 0 (0W·0L)
+                - generic [ref=e194]:
+                  - generic [ref=e195]: WIN RATE
+                  - strong [ref=e196]: —
+                - generic [ref=e197]:
+                  - generic [ref=e198]: P&L
+                  - strong [ref=e199]: $0.00
+              - generic [ref=e200]:
+                - generic [ref=e201]: No closed operations in this live session yet.
+                - button "Run Bot" [ref=e202] [cursor=pointer]
+        - generic [ref=e205]:
+          - generic [ref=e206]:
+            - generic [ref=e207]: Recent Backtests
+            - button "Run Backtest" [ref=e209] [cursor=pointer]
+          - generic [ref=e212]:
+            - generic [ref=e213]: No backtest runs saved yet. Run a simulation to plot the equity curve and compare strategies here.
+            - button "Open Backtest" [ref=e214] [cursor=pointer]
+    - region "Main navigation":
+      - navigation "Main navigation" [ref=e216]:
+        - button "Dashboard" [ref=e217] [cursor=pointer]
+        - button "Run bot" [ref=e225] [cursor=pointer]
+        - button "Backtest" [ref=e231] [cursor=pointer]
+        - button "Predictions" [ref=e238] [cursor=pointer]
+        - button "Statistics" [ref=e245] [cursor=pointer]
+        - button "More" [expanded] [ref=e251] [cursor=pointer]
+  - menu "More options" [ref=e431]:
+    - generic [ref=e432]:
+      - menuitem "Bot setup" [active] [ref=e433] [cursor=pointer]
+      - menuitem "Training" [ref=e439] [cursor=pointer]
+      - menuitem "Settings" [ref=e455] [cursor=pointer]

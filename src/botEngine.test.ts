@@ -76,18 +76,22 @@ describe('botEngine (Unified Trading, Crypto & Prediction Market Engine)', () =>
     expect(report.wilsonLowerBoundPct).toBeGreaterThanOrEqual(0)
   })
 
-  it('computes accuracy reports (evaluateBotPresetAccuracy) for all 8 presets without error', async () => {
-    for (const preset of STRATEGY_PRESETS) {
-      const candles = await syntheticSource.getCandles({
-        pair: preset.strategy.pair,
-        interval: preset.timeframe,
-        limit: 220,
-      })
-      const report = evaluateBotPresetAccuracy(candles, preset)
+  it('computes accuracy reports (evaluateBotPresetAccuracy) for all catalog presets without error', async () => {
+    const candleSets = await Promise.all(
+      STRATEGY_PRESETS.map((preset) =>
+        syntheticSource.getCandles({
+          pair: preset.strategy.pair,
+          interval: preset.timeframe,
+          limit: 220,
+        }),
+      ),
+    )
+    STRATEGY_PRESETS.forEach((preset, idx) => {
+      const report = evaluateBotPresetAccuracy(candleSets[idx], preset)
       expect(report.presetId).toBe(preset.id)
       expect(report.winRatePct).toBeGreaterThanOrEqual(0)
       expect(report.winRatePct).toBeLessThanOrEqual(100)
-    }
+    })
   })
 
   it('preserves monotonic trade and ticket ID counters across history trimming', () => {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity,
   ArrowDownRight,
@@ -6,9 +6,10 @@ import {
   Check,
   Play,
   ShieldAlert,
-  Sparkles,
+  Layers,
   Target,
   TrendingUp,
+  X,
 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -40,10 +41,12 @@ import type {
   AverageKind,
   Candle,
   Interval,
+  OrderPrefillIntent,
   Signal,
   SignalParams,
   Strategy,
 } from '../types'
+import type { CoinFocusMeta, LiveMarketMetrics } from './MarketSection'
 
 type PresetReport = ReturnType<typeof evaluateBotPresetAccuracy>
 
@@ -55,6 +58,8 @@ type StudioSidebarProps = {
   signals: Signal[]
   orderSide: 'buy' | 'sell'
   onOrderSideChange: (side: 'buy' | 'sell') => void
+  orderPrefill?: OrderPrefillIntent | null
+  onClearOrderPrefill?: () => void
   strategy?: Strategy
   onSaveStrategy?: (next: Strategy) => void
   onChangeParams?: (next: SignalParams) => void
@@ -68,6 +73,10 @@ type StudioSidebarProps = {
   orderFeedback: string | null
   atr14: number | null
   lastVwap: number | null
+  coinProfile?: CoinFocusMeta
+  onCalibratePreset?: () => void
+  liveMetrics?: LiveMarketMetrics | null
+  className?: string
 }
 
 function biasBadgeVariant(
@@ -86,6 +95,8 @@ function StudioSidebar({
   signals,
   orderSide,
   onOrderSideChange,
+  orderPrefill = null,
+  onClearOrderPrefill,
   strategy,
   onSaveStrategy,
   onChangeParams,
@@ -99,9 +110,33 @@ function StudioSidebar({
   orderFeedback,
   atr14,
   lastVwap,
+  coinProfile,
+  onCalibratePreset,
+  liveMetrics,
+  className,
 }: StudioSidebarProps) {
   const { t, locale, language } = useI18n()
-  const [activeTab, setActiveTab] = useState<'strategies' | 'indicators' | 'trade'>('strategies')
+  const notionalInputRef = useRef<HTMLInputElement | null>(null)
+  const [tabState, setTabState] = useState<{
+    prefillNonce: number
+    tab: 'strategies' | 'indicators' | 'trade'
+  }>({ prefillNonce: 0, tab: 'strategies' })
+  const currentPrefillNonce = orderPrefill?.nonce ?? 0
+  const activeTab =
+    currentPrefillNonce > 0 && tabState.prefillNonce !== currentPrefillNonce
+      ? 'trade'
+      : tabState.tab
+  const setActiveTab = (tab: 'strategies' | 'indicators' | 'trade') =>
+    setTabState({ prefillNonce: currentPrefillNonce, tab })
+
+  useEffect(() => {
+    if (!orderPrefill || orderPrefill.pair !== pair) return
+    const frame = requestAnimationFrame(() => {
+      notionalInputRef.current?.focus()
+      notionalInputRef.current?.select()
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [orderPrefill, pair])
   const [presetFilter, setPresetFilter] = useState<'all' | 'crypto-spot' | 'prediction-market'>('all')
   const feedSignature = `${pair}|${timeframe}|${candles.length}|${candles[candles.length - 1]?.time ?? 0}`
   const [reportBatch, setReportBatch] = useState<{
@@ -285,16 +320,21 @@ function StudioSidebar({
       : null
 
   return (
-    <aside className="flex h-full min-h-0 w-full flex-col border-t border-border bg-card lg:w-[344px] lg:shrink-0 lg:border-t-0 lg:border-l">
+    <aside
+      className={cn(
+        'flex h-full min-h-0 w-full flex-col bg-card lg:w-[324px] lg:shrink-0 xl:w-[344px]',
+        className,
+      )}
+    >
       <Tabs
         value={activeTab}
         onValueChange={(v) => setActiveTab(v as 'strategies' | 'indicators' | 'trade')}
         className="flex min-h-0 flex-1 flex-col gap-0"
       >
-        <div className="shrink-0 border-b border-border px-2.5 py-2">
+        <div className="shrink-0 px-2.5 py-2">
           <TabsList className="grid w-full grid-cols-3">
             <TabsTrigger value="strategies" className="text-[11px]">
-              <Sparkles className="size-3" />
+              <Layers className="size-3" />
               {t('studio.tabStrategies')}
             </TabsTrigger>
             <TabsTrigger value="indicators" className="text-[11px]">
@@ -310,16 +350,51 @@ function StudioSidebar({
 
         <ScrollArea className="min-h-0 flex-1">
           {/* ================= STRATEGIES TAB ================= */}
-          <TabsContent value="strategies" className="m-0 flex flex-col gap-3 p-3">
+          <TabsContent value="strategies" className="m-0 flex flex-col gap-3 p-3 pb-[var(--flare-dock-clearance)]">
+            {coinProfile && (
+              <div className="flex flex-col gap-1.5 rounded-sm bg-primary/10 p-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-mono text-[10px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">
+                    {t('terminal.optimalPreset')}
+                  </span>
+                  {onCalibratePreset && (
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant="default"
+                      onClick={onCalibratePreset}
+                    >
+                      <Target className="size-3" />
+                      <span>
+                        {t('terminal.calibrate', {
+                          coin: pair.replace('/USDT', ''),
+                        })}
+                      </span>
+                    </Button>
+                  )}
+                </div>
+                <span className="font-mono text-xs font-semibold text-foreground">
+                  {language === 'es'
+                    ? coinProfile.presetBadgeEs
+                    : coinProfile.presetBadgeEn}
+                </span>
+                <span className="font-mono text-[10.5px] text-muted-foreground tabular-nums">
+                  {language === 'es'
+                    ? coinProfile.edgeSummaryEs
+                    : coinProfile.edgeSummaryEn}
+                </span>
+              </div>
+            )}
+
             {onChangeParams && (
-              <div className="flex flex-col gap-2 rounded-sm border border-border bg-secondary/35 p-2.5">
+              <div className="flex flex-col gap-2 rounded-sm bg-muted/35 p-2.5">
                 <div className="flex items-center justify-between gap-2">
                   <span className="font-mono text-[10.5px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">
                     {t('studio.maTuner')}
                   </span>
-                  <Badge variant="outline" className="font-mono text-[10px]">
+                  <span className="font-mono text-[10px] text-muted-foreground">
                     {params.average.toUpperCase()} {params.fastPeriod}/{params.slowPeriod}
-                  </Badge>
+                  </span>
                 </div>
                 <div className="grid grid-cols-3 gap-1.5">
                   <Select
@@ -435,10 +510,10 @@ function StudioSidebar({
                   <div
                     key={preset.id}
                     className={cn(
-                      'flex flex-col gap-1.5 rounded-sm border p-2.5 transition-colors',
+                      'flex flex-col gap-1.5 rounded-sm p-2.5 transition-colors',
                       isActivePreset
-                        ? 'border-primary/60 bg-primary/8'
-                        : 'border-border bg-secondary/25 hover:border-[var(--border-strong)]',
+                        ? 'bg-primary/12'
+                        : 'bg-muted/25 hover:bg-muted/40',
                     )}
                   >
                     <div className="flex items-start justify-between gap-2">
@@ -454,10 +529,6 @@ function StudioSidebar({
                         {preset.timeframe}
                       </Badge>
                     </div>
-
-                    <p className="text-[11px] leading-relaxed text-muted-foreground">
-                      {preset.description}
-                    </p>
 
                     <div className="flex flex-wrap items-center gap-1.5 font-mono text-[10px] text-muted-foreground tabular-nums">
                       <span>{preset.strategy.pair}</span>
@@ -477,7 +548,7 @@ function StudioSidebar({
                     </div>
 
                     {report && (
-                      <div className="grid grid-cols-4 gap-1 rounded-[4px] border border-border/70 bg-background/60 px-2 py-1.5 font-mono text-[10.5px] tabular-nums">
+                      <div className="grid grid-cols-4 gap-1 rounded-[4px] bg-background/60 px-2 py-1.5 font-mono text-[10.5px] tabular-nums">
                         <div className="flex flex-col">
                           <span className="text-[9px] text-muted-foreground">WR</span>
                           <span
@@ -548,9 +619,62 @@ function StudioSidebar({
           </TabsContent>
 
           {/* ================= INDICATORS & RULES TAB ================= */}
-          <TabsContent value="indicators" className="m-0 flex flex-col gap-3 p-3">
+          <TabsContent value="indicators" className="m-0 flex flex-col gap-3 p-3 pb-[var(--flare-dock-clearance)]">
+            {liveMetrics && (
+              <div className="flex flex-col gap-2 rounded-sm bg-muted/30 p-2.5 font-mono tabular-nums">
+                <span className="text-[10px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">
+                  {t('terminal.marketSnapshot')}
+                </span>
+                <div className="grid grid-cols-2 gap-1.5 text-[10.5px]">
+                  <div className="flex flex-col gap-0.5 rounded-[4px] bg-background/55 px-2 py-1.5">
+                    <span className="text-[9.5px] text-muted-foreground">
+                      {t('terminal.emaRegime')}
+                    </span>
+                    <span
+                      className={cn(
+                        'font-semibold',
+                        liveMetrics.emaDistPct >= 0
+                          ? 'text-[var(--positive)]'
+                          : 'text-[var(--negative)]',
+                      )}
+                    >
+                      {liveMetrics.emaDistPct >= 0 ? 'BULL ▲' : 'BEAR ▼'}{' '}
+                      {liveMetrics.emaDistPct >= 0 ? '+' : ''}
+                      {liveMetrics.emaDistPct.toFixed(2)}%
+                    </span>
+                  </div>
+                  <div className="flex flex-col gap-0.5 rounded-[4px] bg-background/55 px-2 py-1.5">
+                    <span className="text-[9.5px] text-muted-foreground">
+                      RSI(14) · {liveMetrics.is24hChange ? t('studio.change24h') : 'Δ'}
+                    </span>
+                    <span className="font-semibold text-foreground">
+                      {liveMetrics.lastRsi.toFixed(1)} ·{' '}
+                      <span
+                        className={
+                          liveMetrics.changePct >= 0
+                            ? 'text-[var(--positive)]'
+                            : 'text-[var(--negative)]'
+                        }
+                      >
+                        {liveMetrics.changePct >= 0 ? '+' : ''}
+                        {liveMetrics.changePct.toFixed(2)}%
+                      </span>
+                    </span>
+                  </div>
+                  <div className="col-span-2 flex items-center justify-between gap-2 rounded-[4px] bg-background/55 px-2 py-1.5">
+                    <span className="text-[9.5px] text-muted-foreground">
+                      {t('terminal.range120')}
+                    </span>
+                    <span className="font-semibold text-foreground">
+                      ${formatPrice(liveMetrics.low)} – ${formatPrice(liveMetrics.high)}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {techSummary && (
-              <div className="flex flex-col gap-2.5 rounded-sm border border-border bg-secondary/35 p-2.5">
+              <div className="flex flex-col gap-2.5 rounded-sm bg-muted/35 p-2.5">
                 <div className="flex items-center justify-between gap-2">
                   <span className="font-mono text-[10.5px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">
                     {t('studio.consensus')}
@@ -611,14 +735,14 @@ function StudioSidebar({
                 <Separator />
 
                 <div className="grid grid-cols-2 gap-2 font-mono text-[10.5px] tabular-nums">
-                  <div className="flex flex-col gap-0.5 rounded-[4px] border border-border/70 bg-background/50 px-2 py-1.5">
+                  <div className="flex flex-col gap-0.5 rounded-[4px] bg-background/50 px-2 py-1.5">
                     <span className="text-[9.5px] text-muted-foreground">ATR (14)</span>
                     <span className="font-semibold text-foreground">
                       {atr14 !== null ? `$${formatPrice(atr14)}` : '—'}
                       {atrPct !== null ? ` (${atrPct.toFixed(2)}%)` : ''}
                     </span>
                   </div>
-                  <div className="flex flex-col gap-0.5 rounded-[4px] border border-border/70 bg-background/50 px-2 py-1.5">
+                  <div className="flex flex-col gap-0.5 rounded-[4px] bg-background/50 px-2 py-1.5">
                     <span className="text-[9.5px] text-muted-foreground">VWAP Session</span>
                     <span
                       className={cn(
@@ -643,7 +767,7 @@ function StudioSidebar({
                     (reading) => (
                       <div
                         key={reading.name}
-                        className="flex items-center justify-between gap-2 border-b border-border/40 py-1 font-mono text-[11px] last:border-b-0 tabular-nums"
+                        className="flex items-center justify-between gap-2 py-1 font-mono text-[11px] tabular-nums"
                       >
                         <span className="truncate text-muted-foreground">
                           {reading.name}
@@ -670,13 +794,15 @@ function StudioSidebar({
               </div>
             )}
 
-            {/* Quantitative Prediction Rules for active timeframe */}
-            <div className="flex flex-col gap-2 rounded-sm border border-border bg-secondary/25 p-2.5">
+            {/* Prediction Rules for active timeframe */}
+            <div className="flex flex-col gap-2 rounded-sm bg-muted/25 p-2.5">
               <div className="flex items-center justify-between gap-2">
                 <span className="font-mono text-[10.5px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">
                   {t('studio.predictionRules', { tf: timeframe })}
                 </span>
-                <Badge variant="violet">{predictionStats.length}</Badge>
+                <span className="font-mono text-[10.5px] text-muted-foreground tabular-nums">
+                  {predictionStats.length}
+                </span>
               </div>
               {predictionStats.length === 0 ? (
                 <p className="text-[11px] leading-relaxed text-muted-foreground">
@@ -688,10 +814,10 @@ function StudioSidebar({
                     <div
                       key={rule.ruleId}
                       className={cn(
-                        'flex flex-col gap-1 rounded-[4px] border p-2',
+                        'flex flex-col gap-1 rounded-[4px] p-2',
                         rule.currentlyActive
-                          ? 'border-[var(--positive)]/50 bg-[var(--positive-soft)]'
-                          : 'border-border/70 bg-background/55',
+                          ? 'bg-[var(--positive-soft)]'
+                          : 'bg-background/55',
                       )}
                     >
                       <div className="flex items-start justify-between gap-2">
@@ -727,7 +853,7 @@ function StudioSidebar({
                 {t('studio.signalsJumpHint')}
               </p>
               {recentSignals.length === 0 ? (
-                <div className="rounded-sm border border-border bg-secondary/20 px-2.5 py-2 text-[11px] text-muted-foreground">
+                <div className="rounded-sm bg-muted/20 px-2.5 py-2 text-[11px] text-muted-foreground">
                   {t('signals.empty')}
                 </div>
               ) : (
@@ -742,7 +868,7 @@ function StudioSidebar({
                         onClick={() => {
                           if (globalIdx !== undefined) onJumpToBar(globalIdx)
                         }}
-                        className="flex cursor-pointer items-center justify-between gap-2 rounded-[4px] border border-border/70 bg-secondary/20 px-2 py-1.5 text-left font-mono text-[10.5px] transition-colors hover:border-[var(--border-strong)] hover:bg-secondary/60 tabular-nums"
+                        className="flex cursor-pointer items-center justify-between gap-2 rounded-[4px] bg-muted/20 px-2 py-1.5 text-left font-mono text-[10.5px] transition-colors hover:bg-[var(--surface-hover)] tabular-nums"
                       >
                         <div className="flex items-center gap-1.5">
                           {sig.side === 'buy' ? (
@@ -775,10 +901,10 @@ function StudioSidebar({
             </div>
           </TabsContent>
 
-          {/* ================= TRADE & RISK CALIBRATION TAB ================= */}
-          <TabsContent value="trade" className="m-0 flex flex-col gap-3 p-3">
+          {/* ================= TRADE & RISK TAB ================= */}
+          <TabsContent value="trade" className="m-0 flex flex-col gap-3 p-3 pb-[var(--flare-dock-clearance)]">
             {/* Direction Toggle */}
-            <div className="grid grid-cols-2 gap-1.5 rounded-sm border border-border bg-background/60 p-1">
+            <div className="grid grid-cols-2 gap-1.5 rounded-sm bg-background/60 p-1">
               <Button
                 type="button"
                 size="sm"
@@ -802,7 +928,36 @@ function StudioSidebar({
             </div>
 
             {/* Ticket Amount */}
-            <div className="flex flex-col gap-2 rounded-sm border border-border bg-secondary/30 p-2.5">
+            <div className="flex flex-col gap-2 rounded-sm bg-muted/30 p-2.5">
+              {orderPrefill && orderPrefill.pair === pair && (
+                <div className="flex flex-col gap-1 rounded-[4px] bg-primary/10 px-2 py-1.5 font-mono text-[10.5px]">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-muted-foreground">
+                      {t('studio.prefillRefLabel')}
+                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <strong className="text-foreground tabular-nums">
+                        ${formatPrice(orderPrefill.referencePrice)}
+                      </strong>
+                      {onClearOrderPrefill && (
+                        <button
+                          type="button"
+                          onClick={onClearOrderPrefill}
+                          aria-label={t('studio.prefillClear')}
+                          title={t('studio.prefillClear')}
+                          className="inline-flex size-4 cursor-pointer items-center justify-center rounded text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+                        >
+                          <X className="size-3" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  <p className="font-sans text-[10px] leading-snug text-muted-foreground">
+                    {t('studio.prefillMarketNote')}
+                  </p>
+                </div>
+              )}
+
               <div className="flex items-center justify-between gap-2 font-mono text-[10.5px]">
                 <span className="text-muted-foreground">ORDER NOTIONAL (USD)</span>
                 <span className="font-semibold text-foreground tabular-nums">
@@ -813,6 +968,7 @@ function StudioSidebar({
               </div>
               <div className="flex items-center gap-1.5">
                 <Input
+                  ref={notionalInputRef}
                   type="number"
                   min={10}
                   step={50}
@@ -825,7 +981,7 @@ function StudioSidebar({
                   }}
                   aria-label="Order notional USD"
                 />
-                <span className="inline-flex h-8 shrink-0 items-center rounded-sm border border-border bg-secondary px-2 font-mono text-[10.5px] text-muted-foreground">
+                <span className="inline-flex h-8 shrink-0 items-center rounded-sm bg-muted/45 px-2 font-mono text-[10.5px] text-muted-foreground">
                   USDT
                 </span>
               </div>
@@ -857,7 +1013,7 @@ function StudioSidebar({
               </Button>
 
               {orderFeedback && (
-                <div className="rounded-[4px] border border-primary/40 bg-primary/10 px-2 py-1.5 font-mono text-[10.5px] text-foreground">
+                <div className="rounded-[4px] bg-primary/10 px-2 py-1.5 text-[11px] text-foreground">
                   {orderFeedback}
                 </div>
               )}
@@ -865,7 +1021,7 @@ function StudioSidebar({
 
             {/* Active Position Box if running */}
             {openPos && (
-              <div className="flex flex-col gap-1.5 rounded-sm border border-[var(--brand-violet)]/40 bg-[var(--brand-violet)]/8 p-2.5 font-mono text-[10.5px] tabular-nums">
+              <div className="flex flex-col gap-1.5 rounded-sm bg-[var(--brand-violet)]/10 p-2.5 font-mono text-[10.5px] tabular-nums">
                 <div className="flex items-center justify-between gap-2">
                   <span className="font-semibold text-foreground">
                     OPEN · {openPos.side.toUpperCase()} {openPos.pair}
@@ -896,16 +1052,16 @@ function StudioSidebar({
               </div>
             )}
 
-            {/* TP / SL / Position Risk Calibration */}
+            {/* TP / SL / Position Risk */}
             {strategy && onSaveStrategy && (
-              <div className="flex flex-col gap-2 rounded-sm border border-border bg-secondary/25 p-2.5">
+              <div className="flex flex-col gap-2 rounded-sm bg-muted/25 p-2.5">
                 <div className="flex items-center justify-between gap-2">
                   <span className="font-mono text-[10.5px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">
                     {t('studio.riskCalibration')}
                   </span>
-                  <Badge variant="outline" className="font-mono text-[10px]">
+                  <span className="font-mono text-[10px] text-muted-foreground">
                     R:R 1:{rrRatio}
-                  </Badge>
+                  </span>
                 </div>
 
                 <div className="grid grid-cols-2 gap-2">
@@ -960,7 +1116,7 @@ function StudioSidebar({
                 </div>
 
                 {spotPrice > 0 && (
-                  <div className="grid grid-cols-3 gap-1 rounded-[4px] border border-border/70 bg-background/60 px-2 py-1.5 font-mono text-[10px] tabular-nums">
+                  <div className="grid grid-cols-3 gap-1 rounded-[4px] bg-background/60 px-2 py-1.5 font-mono text-[10px] tabular-nums">
                     <div>
                       <span className="block text-[9px] text-muted-foreground">TP EST.</span>
                       <span className="font-semibold text-[var(--positive)]">
@@ -1005,4 +1161,57 @@ function StudioSidebar({
   )
 }
 
-export default StudioSidebar
+function areStudioSidebarPropsEqual(
+  prev: StudioSidebarProps,
+  next: StudioSidebarProps,
+): boolean {
+  if (
+    prev.pair !== next.pair ||
+    prev.timeframe !== next.timeframe ||
+    prev.params.fastPeriod !== next.params.fastPeriod ||
+    prev.params.slowPeriod !== next.params.slowPeriod ||
+    prev.params.average !== next.params.average ||
+    prev.orderSide !== next.orderSide ||
+    prev.orderPrefill !== next.orderPrefill ||
+    prev.orderSizeUsd !== next.orderSizeUsd ||
+    prev.submittingOrder !== next.submittingOrder ||
+    prev.orderFeedback !== next.orderFeedback ||
+    prev.strategy !== next.strategy ||
+    prev.botSnapshot !== next.botSnapshot ||
+    prev.coinProfile !== next.coinProfile ||
+    prev.className !== next.className ||
+    prev.signals.length !== next.signals.length
+  ) {
+    return false
+  }
+  const prevLastSig = prev.signals[prev.signals.length - 1]
+  const nextLastSig = next.signals[next.signals.length - 1]
+  if (
+    prevLastSig?.time !== nextLastSig?.time ||
+    prevLastSig?.side !== nextLastSig?.side
+  ) {
+    return false
+  }
+  // Ignore intra-bar live ticks on the active candle; re-render on bar close/switch
+  const prevLen = prev.candles.length
+  const nextLen = next.candles.length
+  if (prevLen !== nextLen) return false
+  if (prevLen > 1) {
+    const prevClosed = prev.candles[prevLen - 2]
+    const nextClosed = next.candles[nextLen - 2]
+    if (
+      prevClosed.time !== nextClosed.time ||
+      prevClosed.close !== nextClosed.close
+    ) {
+      return false
+    }
+  }
+  if (prevLen > 0) {
+    if (prev.candles[prevLen - 1].time !== next.candles[nextLen - 1].time) {
+      return false
+    }
+  }
+  return true
+}
+
+export default memo(StudioSidebar, areStudioSidebarPropsEqual)

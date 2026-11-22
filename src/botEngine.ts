@@ -18,7 +18,17 @@ import {
   type PredictionOutcome,
 } from './predictions'
 import { crossoverSignals, defaultSignalParams } from './signals'
-import { defaultStrategy } from './strategy'
+import {
+  clampBreakOfStructureParams,
+  clampDonchianParams,
+  clampSupportResistanceParams,
+  evaluateDonchianExit,
+  isNewSpotEngine,
+  signalAt as evaluateNewSpotEngineAt,
+  type NewSpotEngineId,
+  type SpotEngineSignal,
+} from './spotEngines'
+import { availablePairs, defaultStrategy } from './strategy'
 import type {
   Candle,
   ExitReason,
@@ -29,13 +39,14 @@ import type {
 } from './types'
 
 type BotExecutionMode = 'paper' | 'live-webhook'
-type BotDomain = 'crypto-spot' | 'prediction-market'
-type SpotSignalEngine =
+export type BotDomain = 'crypto-spot' | 'prediction-market'
+export type SpotSignalEngine =
   | 'crossover'
   | 'rsi-reversion'
   | 'momentum-structure'
+  | NewSpotEngineId
 
-type SignalFilterConfig = {
+export type SignalFilterConfig = {
   /** Signal engine for Crypto Spot/Perps */
   signalEngine?: SpotSignalEngine
   /** Skip buying in overbought conditions (RSI > maxBuyRsi) or selling in oversold (RSI < minSellRsi) */
@@ -51,6 +62,28 @@ type SignalFilterConfig = {
   breakevenAtOneR?: boolean
   /** When false, avoid premature exits on opposite signals before target or stop */
   flipOnOppositeSignal?: boolean
+  /** Donchian Breakout parameters */
+  channelPeriod?: number
+  exitPeriod?: number
+  atrPeriod?: number
+  atrStopMult?: number
+  trendFilter?: 'ema200' | 'none'
+  minAtrPct?: number
+  /** Support & Resistance parameters */
+  pivotLookback?: number
+  clusterAtrMult?: number
+  minTouches?: number
+  maxLevelAgeBars?: number
+  touchToleranceAtr?: number
+  minLongRsi?: number
+  maxShortRsi?: number
+  /** Break of Structure parameters */
+  swingLookback?: number
+  retestWindowBars?: number
+  retestToleranceAtr?: number
+  stopBufferAtr?: number
+  targetRMultiple?: number
+  requireRetest?: boolean
 }
 
 export type StrategyPreset = {
@@ -69,6 +102,21 @@ export type StrategyPreset = {
   useQuarterKelly?: boolean
 }
 
+export type StrategyPresetPatch = {
+  name?: string
+  description?: string
+  domain?: BotDomain
+  timeframe?: Interval
+  strategy?: Partial<Strategy>
+  signalParams?: Partial<SignalParams>
+  execution?: Partial<BacktestSettings>
+  filters?: Partial<SignalFilterConfig>
+  predictionRuleId?: string
+  minEdgePct?: number
+  minTriggers?: number
+  useQuarterKelly?: boolean
+}
+
 type ActivePaperPosition = {
   side: TradeSide
   pair: string
@@ -78,8 +126,11 @@ type ActivePaperPosition = {
   notional: number
   entryFee: number
   stopPrice: number
+  initialStopPrice?: number
   targetPrice: number
   breakevenArmed?: boolean
+  presetId?: string
+  presetName?: string
 }
 
 type ActivePredictionTicket = {
@@ -171,6 +222,11 @@ type StepBotOptions = {
    * (`evaluateBotPresetAccuracy`) when historical CLOB orderbooks are unavailable.
    */
   benchmarkFixedMidPrice?: number
+  /**
+   * Control-plane flag: when `false` (paused state), open positions and active
+   * prediction tickets continue to be managed/closed, while new entries are blocked.
+   */
+  allowNewEntries?: boolean
 }
 
 export function resolvePresetPredictionRule(preset: StrategyPreset) {
@@ -179,6 +235,293 @@ export function resolvePresetPredictionRule(preset: StrategyPreset) {
     BITCOIN_20_PREDICTIONS.find((r) => r.timeframe === preset.timeframe) ??
     null
   )
+}
+
+const VALID_BOT_DOMAINS: readonly BotDomain[] = [
+  'crypto-spot',
+  'prediction-market',
+]
+const VALID_BOT_INTERVALS: readonly Interval[] = ['5m', '15m', '1h', '4h', '1d']
+const VALID_SIGNAL_ENGINES: readonly SpotSignalEngine[] = [
+  'momentum-structure',
+  'crossover',
+  'rsi-reversion',
+  'donchian-breakout',
+  'support-resistance',
+  'break-of-structure',
+]
+
+function clampRange(
+  value: unknown,
+  fallback: number,
+  min: number,
+  max: number,
+  roundInt = false,
+): number {
+  const num = typeof value === 'number' ? value : Number.NaN
+  if (!Number.isFinite(num)) return fallback
+  const bounded = Math.min(max, Math.max(min, num))
+  return roundInt ? Math.round(bounded) : bounded
+}
+
+/**
+ * Safely merges a user-supplied parameter patch into a `StrategyPreset`,
+ * clamping every numeric bound and keeping signal/RSI inequalities coherent.
+ */
+export function mergePresetPatch(
+  base: StrategyPreset,
+  patch?: StrategyPresetPatch | null,
+): StrategyPreset {
+  if (!patch || typeof patch !== 'object') return base
+
+  const domain: BotDomain =
+    patch.domain && VALID_BOT_DOMAINS.includes(patch.domain)
+      ? patch.domain
+      : base.domain
+  const timeframe: Interval =
+    patch.timeframe && VALID_BOT_INTERVALS.includes(patch.timeframe)
+      ? patch.timeframe
+      : base.timeframe
+
+  const rawPair = patch.strategy?.pair
+  const pair =
+    typeof rawPair === 'string' && availablePairs.includes(rawPair)
+      ? rawPair
+      : base.strategy.pair
+
+  const nextStrategy: Strategy = {
+    pair,
+    positionSize: clampRange(
+      patch.strategy?.positionSize,
+      base.strategy.positionSize,
+      0.1,
+      100,
+    ),
+    stopLoss: clampRange(
+      patch.strategy?.stopLoss,
+      base.strategy.stopLoss,
+      0.1,
+      50,
+    ),
+    takeProfit: clampRange(
+      patch.strategy?.takeProfit,
+      base.strategy.takeProfit,
+      0.1,
+      100,
+    ),
+    maxDailyRisk: clampRange(
+      patch.strategy?.maxDailyRisk,
+      base.strategy.maxDailyRisk,
+      0.1,
+      100,
+    ),
+  }
+
+  let fastPeriod = clampRange(
+    patch.signalParams?.fastPeriod,
+    base.signalParams.fastPeriod,
+    2,
+    150,
+    true,
+  )
+  let slowPeriod = clampRange(
+    patch.signalParams?.slowPeriod,
+    base.signalParams.slowPeriod,
+    3,
+    300,
+    true,
+  )
+  if (fastPeriod >= slowPeriod) {
+    slowPeriod = Math.min(300, fastPeriod + 1)
+    if (fastPeriod >= slowPeriod) {
+      fastPeriod = Math.max(2, slowPeriod - 1)
+    }
+  }
+
+  const nextSignalParams: SignalParams = {
+    fastPeriod,
+    slowPeriod,
+    average:
+      patch.signalParams?.average === 'sma' ||
+      patch.signalParams?.average === 'ema'
+        ? patch.signalParams.average
+        : base.signalParams.average,
+  }
+
+  const nextExecution: BacktestSettings = {
+    initialBalance: clampRange(
+      patch.execution?.initialBalance,
+      base.execution.initialBalance,
+      100,
+      10_000_000,
+    ),
+    commissionPct: clampRange(
+      patch.execution?.commissionPct,
+      base.execution.commissionPct,
+      0,
+      5,
+    ),
+    slippagePct: clampRange(
+      patch.execution?.slippagePct,
+      base.execution.slippagePct,
+      0,
+      5,
+    ),
+    allowShort:
+      typeof patch.execution?.allowShort === 'boolean'
+        ? patch.execution.allowShort
+        : base.execution.allowShort,
+  }
+
+  const baseFilters = base.filters ?? {}
+  const patchFilters = patch.filters ?? {}
+  const signalEngine: SpotSignalEngine =
+    patchFilters.signalEngine &&
+    VALID_SIGNAL_ENGINES.includes(patchFilters.signalEngine)
+      ? patchFilters.signalEngine
+      : (baseFilters.signalEngine ?? 'momentum-structure')
+
+  const maxBuyRsi = clampRange(
+    patchFilters.maxBuyRsi,
+    baseFilters.maxBuyRsi ?? 68,
+    45,
+    95,
+    true,
+  )
+  const minSellRsi = Math.min(
+    maxBuyRsi - 5,
+    clampRange(
+      patchFilters.minSellRsi,
+      baseFilters.minSellRsi ?? 32,
+      5,
+      55,
+      true,
+    ),
+  )
+  const overboughtRsi = clampRange(
+    patchFilters.overboughtRsi,
+    baseFilters.overboughtRsi ?? 70,
+    50,
+    95,
+    true,
+  )
+  const oversoldRsi = Math.min(
+    overboughtRsi - 5,
+    clampRange(
+      patchFilters.oversoldRsi,
+      baseFilters.oversoldRsi ?? 30,
+      5,
+      50,
+      true,
+    ),
+  )
+
+  const nextFilters: SignalFilterConfig = {
+    signalEngine,
+    avoidRsiExtremes:
+      typeof patchFilters.avoidRsiExtremes === 'boolean'
+        ? patchFilters.avoidRsiExtremes
+        : (baseFilters.avoidRsiExtremes ?? true),
+    maxBuyRsi,
+    minSellRsi,
+    oversoldRsi,
+    overboughtRsi,
+    requireEma50Alignment:
+      typeof patchFilters.requireEma50Alignment === 'boolean'
+        ? patchFilters.requireEma50Alignment
+        : (baseFilters.requireEma50Alignment ?? false),
+    breakevenAtOneR:
+      typeof patchFilters.breakevenAtOneR === 'boolean'
+        ? patchFilters.breakevenAtOneR
+        : (baseFilters.breakevenAtOneR ?? true),
+    flipOnOppositeSignal:
+      typeof patchFilters.flipOnOppositeSignal === 'boolean'
+        ? patchFilters.flipOnOppositeSignal
+        : (baseFilters.flipOnOppositeSignal ?? false),
+  }
+
+  if (signalEngine === 'donchian-breakout') {
+    const mergedDonchian = clampDonchianParams({
+      channelPeriod: patchFilters.channelPeriod ?? baseFilters.channelPeriod,
+      exitPeriod: patchFilters.exitPeriod ?? baseFilters.exitPeriod,
+      atrPeriod: patchFilters.atrPeriod ?? baseFilters.atrPeriod,
+      atrStopMult: patchFilters.atrStopMult ?? baseFilters.atrStopMult,
+      trendFilter: patchFilters.trendFilter ?? baseFilters.trendFilter,
+      minAtrPct: patchFilters.minAtrPct ?? baseFilters.minAtrPct,
+    })
+    Object.assign(nextFilters, mergedDonchian)
+  } else if (signalEngine === 'support-resistance') {
+    const mergedSr = clampSupportResistanceParams({
+      pivotLookback: patchFilters.pivotLookback ?? baseFilters.pivotLookback,
+      clusterAtrMult: patchFilters.clusterAtrMult ?? baseFilters.clusterAtrMult,
+      minTouches: patchFilters.minTouches ?? baseFilters.minTouches,
+      maxLevelAgeBars:
+        patchFilters.maxLevelAgeBars ?? baseFilters.maxLevelAgeBars,
+      touchToleranceAtr:
+        patchFilters.touchToleranceAtr ?? baseFilters.touchToleranceAtr,
+      atrStopMult: patchFilters.atrStopMult ?? baseFilters.atrStopMult,
+      minLongRsi: patchFilters.minLongRsi ?? baseFilters.minLongRsi,
+      maxShortRsi: patchFilters.maxShortRsi ?? baseFilters.maxShortRsi,
+      atrPeriod: patchFilters.atrPeriod ?? baseFilters.atrPeriod,
+    })
+    Object.assign(nextFilters, mergedSr)
+  } else if (signalEngine === 'break-of-structure') {
+    const mergedBos = clampBreakOfStructureParams({
+      swingLookback: patchFilters.swingLookback ?? baseFilters.swingLookback,
+      retestWindowBars:
+        patchFilters.retestWindowBars ?? baseFilters.retestWindowBars,
+      retestToleranceAtr:
+        patchFilters.retestToleranceAtr ?? baseFilters.retestToleranceAtr,
+      stopBufferAtr: patchFilters.stopBufferAtr ?? baseFilters.stopBufferAtr,
+      targetRMultiple:
+        patchFilters.targetRMultiple ?? baseFilters.targetRMultiple,
+      atrPeriod: patchFilters.atrPeriod ?? baseFilters.atrPeriod,
+      requireRetest: patchFilters.requireRetest ?? baseFilters.requireRetest,
+    })
+    Object.assign(nextFilters, mergedBos)
+  }
+
+  const validRule =
+    typeof patch.predictionRuleId === 'string' &&
+    BITCOIN_20_PREDICTIONS.some((r) => r.id === patch.predictionRuleId)
+      ? patch.predictionRuleId
+      : base.predictionRuleId
+
+  return {
+    ...base,
+    name:
+      typeof patch.name === 'string' && patch.name.trim().length > 0
+        ? patch.name.trim().slice(0, 90)
+        : base.name,
+    description:
+      typeof patch.description === 'string'
+        ? patch.description.trim().slice(0, 280)
+        : base.description,
+    domain,
+    timeframe,
+    strategy: nextStrategy,
+    signalParams: nextSignalParams,
+    execution: nextExecution,
+    filters: nextFilters,
+    predictionRuleId: validRule,
+    minEdgePct: clampRange(
+      patch.minEdgePct,
+      base.minEdgePct ?? 15,
+      0,
+      50,
+    ),
+    minTriggers: clampRange(
+      patch.minTriggers,
+      base.minTriggers ?? 5,
+      1,
+      100,
+      true,
+    ),
+    useQuarterKelly:
+      typeof patch.useQuarterKelly === 'boolean'
+        ? patch.useQuarterKelly
+        : (base.useQuarterKelly ?? true),
+  }
 }
 
 const DAY_MS = 86_400_000
@@ -214,10 +557,10 @@ export function isCandleClosed(
 export const STRATEGY_PRESETS: StrategyPreset[] = [
   {
     id: 'btc-ema-scalp-5m',
-    name: '1. BTC Structure Scalper & Profit-Lock (5m)',
+    name: '1. BTC 5m Scalp',
     domain: 'crypto-spot',
     description:
-      'Trades 5m micro-structure continuation aligned with EMA 50 using asymmetric R:R and automatic Profit-Lock.',
+      '5m trend continuation aligned with EMA 50 and breakeven stop lock.',
     timeframe: '5m',
     strategy: {
       pair: 'BTC/USDT',
@@ -245,10 +588,10 @@ export const STRATEGY_PRESETS: StrategyPreset[] = [
   },
   {
     id: 'btc-intraday-trend-15m',
-    name: '2. BTC Intraday Structure & Pullback (15m)',
+    name: '2. BTC 15m Pullback',
     domain: 'crypto-spot',
     description:
-      'Captures intraday pullbacks aligned with institutional EMA 50 on 15m with 1:1.7 R:R and mid-move profit lock.',
+      'Intraday 15m pullbacks along EMA 50 with 1:1.7 R:R and breakeven lock.',
     timeframe: '15m',
     strategy: {
       pair: 'BTC/USDT',
@@ -276,10 +619,10 @@ export const STRATEGY_PRESETS: StrategyPreset[] = [
   },
   {
     id: 'eth-swing-breakout-1h',
-    name: '3. ETH Swing Structure & Pullback (1h)',
+    name: '3. ETH 1h Swing',
     domain: 'crypto-spot',
     description:
-      'Buys hourly pullbacks aligned with EMA 50 trend on Ethereum or extreme reversions with mid-trade profit lock.',
+      'Hourly pullbacks along EMA 50 on ETH with breakeven stop lock.',
     timeframe: '1h',
     strategy: {
       pair: 'ETH/USDT',
@@ -306,10 +649,10 @@ export const STRATEGY_PRESETS: StrategyPreset[] = [
   },
   {
     id: 'sol-volatility-surfer-4h',
-    name: '4. SOL Volatility Surfer (EMA 12/26 + Structure · 4h)',
+    name: '4. SOL 4h Trend (EMA 12/26)',
     domain: 'crypto-spot',
     description:
-      'Built for Solana’s high beta on 4h candles, combining structure continuation, RSI filtering, and Profit-Lock.',
+      '4h SOL trend entries with RSI filtering and breakeven stop lock.',
     timeframe: '4h',
     strategy: {
       pair: 'SOL/USDT',
@@ -336,10 +679,10 @@ export const STRATEGY_PRESETS: StrategyPreset[] = [
   },
   {
     id: 'btc-macro-institutional-1d',
-    name: '5. BTC Institutional Macro (SMA 12/50 + Pullback · 1d)',
+    name: '5. BTC 1d Swing (SMA 12/50)',
     domain: 'crypto-spot',
     description:
-      'Long-only daily swing strategy for Bitcoin trading macro pullbacks and 3-day exhaustion setups.',
+      'Long-only daily swing entries on BTC pullbacks.',
     timeframe: '1d',
     strategy: {
       pair: 'BTC/USDT',
@@ -366,10 +709,10 @@ export const STRATEGY_PRESETS: StrategyPreset[] = [
   },
   {
     id: 'pred-btc-sma20-bear-cap-15m',
-    name: '6. Binary Prediction: Bear Cap Below SMA 20 (15m · 93.3% WR)',
+    name: '6. BTC Below SMA 20 (15m)',
     domain: 'prediction-market',
     description:
-      'Buys YES contracts when BTC trades below 15m SMA 20 with RSI < 45, capturing algorithmic downward inertia.',
+      'Buys YES contracts when BTC trades below 15m SMA 20 with RSI < 45.',
     timeframe: '15m',
     strategy: { ...defaultStrategy, pair: 'BTC/USDT', positionSize: 5 },
     signalParams: defaultSignalParams,
@@ -386,10 +729,10 @@ export const STRATEGY_PRESETS: StrategyPreset[] = [
   },
   {
     id: 'pred-btc-inside-bar-4h',
-    name: '7. Binary Prediction: Inside Bar Breakout (4h · 94.9% WR)',
+    name: '7. BTC Inside Bar Breakout (4h)',
     domain: 'prediction-market',
     description:
-      'Trades range-expansion contracts after 4h inside-bar compression resolving within 8 hours.',
+      'Trades range breakouts after 4h inside-bar compression.',
     timeframe: '4h',
     strategy: { ...defaultStrategy, pair: 'BTC/USDT', positionSize: 5 },
     signalParams: defaultSignalParams,
@@ -406,10 +749,10 @@ export const STRATEGY_PRESETS: StrategyPreset[] = [
   },
   {
     id: 'pred-btc-bollinger-reversion-1d',
-    name: '8. Binary Prediction: Rebound After 3 Red Days (1d · 87.0% WR)',
+    name: '8. BTC 3-Day Rebound (1d)',
     domain: 'prediction-market',
     description:
-      'Opens YES relief-bounce contracts within 48h after 3 consecutive red daily candles (87.0% historical win rate over 1000 days).',
+      'Opens YES bounce contracts within 48h after 3 red daily candles.',
     timeframe: '1d',
     strategy: { ...defaultStrategy, pair: 'BTC/USDT', positionSize: 5 },
     signalParams: defaultSignalParams,
@@ -424,12 +767,122 @@ export const STRATEGY_PRESETS: StrategyPreset[] = [
     minTriggers: 5,
     useQuarterKelly: true,
   },
+  {
+    id: 'btc-donchian-breakout-1h',
+    name: '9. BTC 1h Donchian Breakout',
+    domain: 'crypto-spot',
+    description:
+      '20-bar Donchian channel breakout filtered by EMA 200 and ATR volatility with 10-bar channel exit and 2x ATR stop.',
+    timeframe: '1h',
+    strategy: {
+      pair: 'BTC/USDT',
+      positionSize: 15,
+      stopLoss: 2.5,
+      takeProfit: 5.0,
+      maxDailyRisk: 4.0,
+    },
+    signalParams: { fastPeriod: 20, slowPeriod: 50, average: 'ema' },
+    execution: {
+      initialBalance: 10_000,
+      commissionPct: 0.06,
+      slippagePct: 0.03,
+      allowShort: true,
+    },
+    filters: {
+      signalEngine: 'donchian-breakout',
+      channelPeriod: 20,
+      exitPeriod: 10,
+      atrPeriod: 14,
+      atrStopMult: 2,
+      trendFilter: 'ema200',
+      minAtrPct: 0.15,
+      breakevenAtOneR: true,
+      flipOnOppositeSignal: false,
+    },
+  },
+  {
+    id: 'eth-support-resistance-1h',
+    name: '10. ETH 1h Support & Resistance',
+    domain: 'crypto-spot',
+    description:
+      'Confirmed pivot-cluster support/resistance rejections with ATR stops and nearest-level or 2R targets.',
+    timeframe: '1h',
+    strategy: {
+      pair: 'ETH/USDT',
+      positionSize: 15,
+      stopLoss: 2.0,
+      takeProfit: 4.0,
+      maxDailyRisk: 4.0,
+    },
+    signalParams: { fastPeriod: 9, slowPeriod: 26, average: 'ema' },
+    execution: {
+      initialBalance: 10_000,
+      commissionPct: 0.06,
+      slippagePct: 0.03,
+      allowShort: true,
+    },
+    filters: {
+      signalEngine: 'support-resistance',
+      pivotLookback: 2,
+      clusterAtrMult: 0.35,
+      minTouches: 2,
+      maxLevelAgeBars: 300,
+      touchToleranceAtr: 0.25,
+      atrStopMult: 1.0,
+      minLongRsi: 40,
+      maxShortRsi: 60,
+      atrPeriod: 14,
+      breakevenAtOneR: true,
+      flipOnOppositeSignal: false,
+    },
+  },
+  {
+    id: 'sol-bos-structure-15m',
+    name: '11. SOL 15m Break of Structure',
+    domain: 'crypto-spot',
+    description:
+      'Higher-low / lower-high confirmed swing Break of Structure entries (close or retest) with protected swing stops and 2R targets.',
+    timeframe: '15m',
+    strategy: {
+      pair: 'SOL/USDT',
+      positionSize: 15,
+      stopLoss: 1.8,
+      takeProfit: 3.6,
+      maxDailyRisk: 3.5,
+    },
+    signalParams: { fastPeriod: 9, slowPeriod: 21, average: 'ema' },
+    execution: {
+      initialBalance: 10_000,
+      commissionPct: 0.06,
+      slippagePct: 0.03,
+      allowShort: true,
+    },
+    filters: {
+      signalEngine: 'break-of-structure',
+      swingLookback: 2,
+      retestWindowBars: 3,
+      retestToleranceAtr: 0.5,
+      stopBufferAtr: 0.25,
+      targetRMultiple: 2.0,
+      atrPeriod: 14,
+      requireRetest: false,
+      breakevenAtOneR: true,
+      flipOnOppositeSignal: false,
+    },
+  },
 ]
 
 export function createInitialBotState(
   preset: StrategyPreset = STRATEGY_PRESETS[1],
+  options?: { initialBalance?: number; seedLog?: boolean },
 ): BotEngineState {
-  const initialBalance = preset.execution.initialBalance
+  const initialBalance =
+    typeof options?.initialBalance === 'number' &&
+    Number.isFinite(options.initialBalance) &&
+    options.initialBalance >= 0
+      ? options.initialBalance
+      : preset.execution.initialBalance
+  const seedLog = options?.seedLog !== false
   return {
     mode: 'paper',
     domain: preset.domain,
@@ -447,14 +900,16 @@ export function createInitialBotState(
     resolvedTickets: [],
     nextTicketId: 1,
     nextTradeId: 1,
-    logs: [
-      {
-        id: 1,
-        timestamp: new Date().toISOString(),
-        level: 'info',
-        message: `Engine initialized in ${preset.domain} mode (${preset.name}).`,
-      },
-    ],
+    logs: seedLog
+      ? [
+          {
+            id: 1,
+            timestamp: new Date().toISOString(),
+            level: 'info',
+            message: `Engine initialized in ${preset.domain} mode (${preset.name}).`,
+          },
+        ]
+      : [],
   }
 }
 
@@ -592,11 +1047,30 @@ function checkAndApplyBreakeven(
   return pos
 }
 
+function detectSpotSignalDetail(
+  candles: Candle[],
+  signalParams: SignalParams,
+  filters?: SignalFilterConfig,
+): { side: TradeSide; detail?: SpotEngineSignal } | null {
+  const engine = filters?.signalEngine ?? 'crossover'
+  const lastIdx = candles.length - 1
+  if (lastIdx < 25) return null
+
+  if (isNewSpotEngine(engine)) {
+    const detail = evaluateNewSpotEngineAt(engine, candles, lastIdx, filters)
+    return detail ? { side: detail.side, detail } : null
+  }
+
+  const side = detectSpotSignal(candles, signalParams, filters)
+  return side ? { side } : null
+}
+
 /**
  * Evaluates a trading signal on the latest closed candle according to the configured engine:
  * - 'rsi-reversion': Mean reversion after RSI exhaustion with reversal or trend confirmation.
  * - 'momentum-structure': Pullbacks aligned with EMA 50 or rebounds after 3-candle exhaustion.
  * - 'crossover': Classic moving-average crossover (SMA/EMA).
+ * - 'donchian-breakout' | 'support-resistance' | 'break-of-structure': Delegated to `src/spotEngines.ts`.
  */
 function detectSpotSignal(
   candles: Candle[],
@@ -606,6 +1080,10 @@ function detectSpotSignal(
   const engine = filters?.signalEngine ?? 'crossover'
   const lastIdx = candles.length - 1
   if (lastIdx < 25) return null
+
+  if (isNewSpotEngine(engine)) {
+    return evaluateNewSpotEngineAt(engine, candles, lastIdx, filters)?.side ?? null
+  }
 
   const closes = candles.map((c) => c.close)
   const rsiSeries = rsi(closes, 14)
@@ -837,7 +1315,12 @@ export function stepBotEngine(
 
     const targetRule = resolvePresetPredictionRule(preset)
 
-    if (targetRule && !next.dayHalted && next.balance > 0) {
+    if (
+      options?.allowNewEntries !== false &&
+      targetRule &&
+      !next.dayHalted &&
+      next.balance > 0
+    ) {
       const stats = evaluatePredictionRule(targetRule, confirmedCandles)
       const minEdge = preset.minEdgePct ?? 10
       const minTriggers = preset.minTriggers ?? 5
@@ -996,6 +1479,23 @@ export function stepBotEngine(
         strategy,
         execution,
       )
+    } else if (
+      filters?.signalEngine === 'donchian-breakout' &&
+      evaluateDonchianExit(
+        confirmedCandles,
+        confirmedCandles.length - 1,
+        pos.side,
+        filters,
+      )
+    ) {
+      next = closePaperPosition(
+        next,
+        latestCandle.close,
+        latestCandle.time,
+        'signal',
+        strategy,
+        execution,
+      )
     } else {
       next.openPosition = checkAndApplyBreakeven(
         pos,
@@ -1007,7 +1507,8 @@ export function stepBotEngine(
     }
   }
 
-  const signalSide = detectSpotSignal(confirmedCandles, signalParams, filters)
+  const detected = detectSpotSignalDetail(confirmedCandles, signalParams, filters)
+  const signalSide = detected?.side ?? null
 
   if (signalSide) {
     const shouldFlip = filters?.flipOnOppositeSignal ?? true
@@ -1026,7 +1527,12 @@ export function stepBotEngine(
       )
     }
 
-    if (!next.openPosition && !next.dayHalted && next.balance > 0) {
+    if (
+      options?.allowNewEntries !== false &&
+      !next.openPosition &&
+      !next.dayHalted &&
+      next.balance > 0
+    ) {
       if (signalSide === 'sell' && !execution.allowShort) {
         next.logs = appendLog(
           next.logs,
@@ -1050,22 +1556,63 @@ export function stepBotEngine(
         const direction = directionOf(signalSide)
         const entryFee = roundMoney(notional * (execution.commissionPct / 100))
 
+        const defaultStopPrice = roundMoney(
+          entryPrice * (1 - direction * (strategy.stopLoss / 100)),
+        )
+        const defaultTargetPrice = roundMoney(
+          entryPrice * (1 + direction * (strategy.takeProfit / 100)),
+        )
+
+        const detailStop = detected?.detail?.stopPrice
+        const hasValidDetailStop =
+          typeof detailStop === 'number' &&
+          Number.isFinite(detailStop) &&
+          detailStop > 0 &&
+          (signalSide === 'buy'
+            ? detailStop < entryPrice
+            : detailStop > entryPrice)
+        const initialStopPrice = hasValidDetailStop
+          ? roundMoney(detailStop)
+          : defaultStopPrice
+
+        const detailTarget = detected?.detail?.targetPrice
+        const hasValidDetailTarget =
+          typeof detailTarget === 'number' &&
+          Number.isFinite(detailTarget) &&
+          detailTarget > 0 &&
+          (signalSide === 'buy'
+            ? detailTarget > entryPrice
+            : detailTarget < entryPrice)
+
+        let targetPrice = hasValidDetailTarget
+          ? roundMoney(detailTarget)
+          : defaultTargetPrice
+
+        // Break of Structure spec: target is 2R capped by the preset TP
+        if (
+          filters?.signalEngine === 'break-of-structure' &&
+          hasValidDetailTarget
+        ) {
+          targetPrice =
+            signalSide === 'buy'
+              ? Math.min(targetPrice, defaultTargetPrice)
+              : Math.max(targetPrice, defaultTargetPrice)
+        }
+
         next.openPosition = {
           side: signalSide,
           pair: strategy.pair,
           entryPrice: roundMoney(entryPrice),
-          
           entryTime: latestCandle.time,
           quantity,
           notional,
           entryFee,
-          stopPrice: roundMoney(
-            entryPrice * (1 - direction * (strategy.stopLoss / 100)),
-          ),
-          targetPrice: roundMoney(
-            entryPrice * (1 + direction * (strategy.takeProfit / 100)),
-          ),
+          stopPrice: initialStopPrice,
+          initialStopPrice,
+          targetPrice,
           breakevenArmed: false,
+          presetId: preset.id,
+          presetName: preset.name,
         }
 
         next.logs = appendLog(
@@ -1079,6 +1626,31 @@ export function stepBotEngine(
   }
 
   return next
+}
+
+export function closePaperPositionAtPrice(
+  state: BotEngineState,
+  rawExitPrice: number,
+  timeMs: number,
+  reason: ExitReason,
+  preset: StrategyPreset,
+): { state: BotEngineState; closedTrade: BacktestTrade | null } {
+  const normalized = normalizeBotEngineState(state)
+  if (!normalized.openPosition) {
+    return { state: normalized, closedTrade: null }
+  }
+  const next = closePaperPosition(
+    normalized,
+    rawExitPrice,
+    timeMs,
+    reason,
+    preset.strategy,
+    preset.execution,
+  )
+  return {
+    state: next,
+    closedTrade: next.closedTrades[0] ?? null,
+  }
 }
 
 function closePaperPosition(
@@ -1119,6 +1691,11 @@ function closePaperPosition(
     exitTime: timeMs,
     exitReason: reason,
     balanceAfter: balance,
+    ...(pos.presetId ? { presetId: pos.presetId } : {}),
+    ...(pos.presetName ? { presetName: pos.presetName } : {}),
+    ...(pos.initialStopPrice !== undefined
+      ? { initialStopPrice: pos.initialStopPrice }
+      : {}),
   }
 
   let dayHalted = state.dayHalted

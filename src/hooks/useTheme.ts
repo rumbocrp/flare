@@ -1,5 +1,5 @@
-import { useEffect } from "react"
-import type { ThemeSetting } from "../types"
+import { useEffect } from 'react'
+import type { AccentPreset, DensitySetting, ThemeSetting } from '../types'
 
 function resolveTheme(
   setting: ThemeSetting,
@@ -9,15 +9,29 @@ function resolveTheme(
   return setting
 }
 
-export function useTheme(setting: ThemeSetting) {
+export function useTheme(
+  setting: ThemeSetting,
+  options?: {
+    accentPreset?: AccentPreset
+    density?: DensitySetting
+    reducedMotion?: boolean
+  },
+) {
+  const accent = options?.accentPreset ?? 'amber'
+  const density = options?.density ?? 'comfortable'
+  const reducedMotion = options?.reducedMotion ?? false
+
   useEffect(() => {
     const query = window.matchMedia('(prefers-color-scheme: light)')
 
     function apply() {
-      document.documentElement.dataset.theme = resolveTheme(
-        setting,
-        query.matches,
-      )
+      const root = document.documentElement
+      const resolved = resolveTheme(setting, query.matches)
+      root.dataset.theme = resolved
+      root.classList.toggle('dark', resolved === 'dark')
+      root.dataset.accent = accent
+      root.dataset.density = density
+      root.dataset.motion = reducedMotion ? 'reduced' : 'default'
     }
 
     apply()
@@ -26,5 +40,5 @@ export function useTheme(setting: ThemeSetting) {
 
     query.addEventListener('change', apply)
     return () => query.removeEventListener('change', apply)
-  }, [setting])
+  }, [setting, accent, density, reducedMotion])
 }

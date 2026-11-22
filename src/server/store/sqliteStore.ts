@@ -9,6 +9,19 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import type {
+  StrategyFamily,
+  TrainingAssumptions,
+  TrainingConfig,
+  TrainingEquityPoint,
+  TrainingFoldResult,
+  TrainingProgress,
+  TrainingRunKind,
+  TrainingRunMetrics,
+  TrainingRunRecord,
+  TrainingRunStatus,
+  TrainingTradeRecord,
+} from '../../training/types'
 import type { Candle, Interval } from '../../types'
 import type { ExchangeOrderRecord } from '../exchangeAdapter'
 import {
@@ -17,14 +30,36 @@ import {
   type LedgerEntry,
   type LedgerPosting,
 } from '../ledger/doubleEntryLedger'
+import type { PolymarketTimeframe, ResolutionSource } from '../polymarketAdapter'
 import type {
   AuditEventRecord,
+  CollectedWindowRecord,
+  OrderQueryOptions,
   PersistedTenantEnvelope,
+  PredictionStrategyLane,
+  PredictionStrategyMode,
+  PredictionTradeMode,
+  PredictionTradeQueryOptions,
+  PredictionTradeStatus,
+  PredictionWindowQueryOptions,
   RetentionPruneReport,
+  RuntimeEventQueryOptions,
+  RuntimeEventRecord,
+  RuntimeEventSeverity,
+  RuntimeEventType,
   StateStore,
+  StoredPredictionTrade,
+  StoredStrategyState,
+  StrategyAuditAssumptions,
+  StrategyAuditMetrics,
+  StrategyAuditRecord,
+  TrainingRunQueryOptions,
+  UpdateTrainingRunPatch,
+  WindowSnapshotPoint,
 } from './types'
 
 const DEFAULT_RETENTION_DAYS = 90
+const DEFAULT_WINDOW_RETENTION_DAYS = 365
 
 const SQLITE_MIGRATIONS: readonly {
   version: number
@@ -117,9 +152,289 @@ const SQLITE_MIGRATIONS: readonly {
         ON candles_archive (pair, interval, open_time_ms DESC)`,
     ],
   },
+  {
+    version: 3,
+    name: 'prediction_engine_windows_snapshots_trades',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS prediction_windows (
+        slug TEXT PRIMARY KEY,
+        timeframe TEXT NOT NULL,
+        condition_id TEXT,
+        up_token_id TEXT,
+        down_token_id TEXT,
+        resolution_source TEXT NOT NULL,
+        start_time_ms INTEGER NOT NULL,
+        end_time_ms INTEGER NOT NULL,
+        open_twap REAL,
+        close_twap REAL,
+        resolved_up INTEGER,
+        tick_size REAL,
+        neg_risk INTEGER NOT NULL DEFAULT 0,
+        volume_usd REAL,
+        updated_at INTEGER NOT NULL
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_pred_windows_tf_start
+        ON prediction_windows (timeframe, start_time_ms DESC)`,
+      `CREATE INDEX IF NOT EXISTS idx_pred_windows_resolved_end
+        ON prediction_windows (resolved_up, end_time_ms DESC)`,
+      `CREATE TABLE IF NOT EXISTS prediction_window_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        slug TEXT NOT NULL,
+        captured_at_ms INTEGER NOT NULL,
+        seconds_remaining REAL NOT NULL,
+        twap_price REAL,
+        binance_price REAL,
+        sigma_1m REAL,
+        basis_bps REAL,
+        yes_bid REAL,
+        yes_ask REAL,
+        yes_depth_usd REAL,
+        no_bid REAL,
+        no_ask REAL,
+        no_depth_usd REAL,
+        p_model_yes REAL,
+        UNIQUE(slug, captured_at_ms)
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_pred_snapshots_slug_time
+        ON prediction_window_snapshots (slug, captured_at_ms ASC)`,
+      `CREATE INDEX IF NOT EXISTS idx_pred_snapshots_captured_at
+        ON prediction_window_snapshots (captured_at_ms DESC)`,
+      `CREATE TABLE IF NOT EXISTS prediction_shadow_trades (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        strategy_id TEXT NOT NULL,
+        lane TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        slug TEXT NOT NULL,
+        timeframe TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        liquidity_role TEXT NOT NULL,
+        entry_time_ms INTEGER NOT NULL,
+        entry_price REAL NOT NULL,
+        fee_usd REAL NOT NULL,
+        stake_usd REAL NOT NULL,
+        shares REAL NOT NULL,
+        p_model REAL NOT NULL,
+        p_calibrated REAL NOT NULL,
+        markout_30s REAL,
+        resolved_up INTEGER,
+        won INTEGER,
+        net_pnl_usd REAL,
+        venue_order_id TEXT,
+        status TEXT NOT NULL
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_pred_trades_tenant_entry
+        ON prediction_shadow_trades (tenant_id, entry_time_ms DESC)`,
+      `CREATE INDEX IF NOT EXISTS idx_pred_trades_tenant_strategy_status
+        ON prediction_shadow_trades (tenant_id, strategy_id, status, entry_time_ms DESC)`,
+      `CREATE INDEX IF NOT EXISTS idx_pred_trades_slug
+        ON prediction_shadow_trades (slug)`,
+      `CREATE TABLE IF NOT EXISTS prediction_strategy_states (
+        tenant_id TEXT NOT NULL,
+        strategy_id TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        halted_reason TEXT,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (tenant_id, strategy_id)
+      )`,
+    ],
+  },
+  {
+    version: 4,
+    name: 'runtime_events_strategy_audits_and_order_fills',
+    statements: [
+      `ALTER TABLE orders ADD COLUMN filled_qty REAL`,
+      `ALTER TABLE orders ADD COLUMN avg_price REAL`,
+      `ALTER TABLE orders ADD COLUMN fee REAL`,
+      `ALTER TABLE orders ADD COLUMN fee_asset TEXT`,
+      `ALTER TABLE orders ADD COLUMN updated_at TEXT`,
+      `CREATE TABLE IF NOT EXISTS runtime_events (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        timestamp TEXT NOT NULL,
+        type TEXT NOT NULL,
+        severity TEXT NOT NULL,
+        message TEXT NOT NULL,
+        payload_json TEXT,
+        source TEXT NOT NULL,
+        correlation_id TEXT
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_runtime_events_tenant_ts
+        ON runtime_events (tenant_id, timestamp DESC, id DESC)`,
+      `CREATE INDEX IF NOT EXISTS idx_runtime_events_tenant_type_ts
+        ON runtime_events (tenant_id, type, timestamp DESC)`,
+      `CREATE TABLE IF NOT EXISTS strategy_audits (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        preset_id TEXT NOT NULL,
+        preset_name TEXT NOT NULL,
+        domain TEXT NOT NULL,
+        pair TEXT NOT NULL,
+        timeframe TEXT NOT NULL,
+        from_time_ms INTEGER NOT NULL,
+        to_time_ms INTEGER NOT NULL,
+        candles INTEGER NOT NULL,
+        metrics_json TEXT NOT NULL,
+        assumptions_json TEXT NOT NULL,
+        data_source TEXT NOT NULL
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_strategy_audits_tenant_created
+        ON strategy_audits (tenant_id, created_at DESC)`,
+    ],
+  },
+  {
+    version: 5,
+    name: 'training_runs_and_order_preset_attribution',
+    statements: [
+      `ALTER TABLE orders ADD COLUMN preset_id TEXT`,
+      `CREATE INDEX IF NOT EXISTS idx_orders_tenant_preset_ts
+        ON orders (tenant_id, preset_id, timestamp DESC)`,
+      `CREATE TABLE IF NOT EXISTS training_runs (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        client_run_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        preset_id TEXT NOT NULL,
+        strategy_family TEXT NOT NULL,
+        pair TEXT NOT NULL,
+        timeframe TEXT NOT NULL,
+        from_time_ms INTEGER NOT NULL,
+        to_time_ms INTEGER NOT NULL,
+        candle_count INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        config_json TEXT NOT NULL,
+        progress_json TEXT,
+        metrics_json TEXT,
+        folds_json TEXT,
+        equity_json TEXT,
+        trades_json TEXT,
+        assumptions_json TEXT NOT NULL,
+        data_source TEXT NOT NULL,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        completed_at TEXT
+      )`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_training_runs_client
+        ON training_runs (tenant_id, client_run_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_training_runs_tenant_created
+        ON training_runs (tenant_id, created_at DESC)`,
+      `CREATE INDEX IF NOT EXISTS idx_training_runs_preset_created
+        ON training_runs (tenant_id, preset_id, created_at DESC)`,
+    ],
+  },
 ]
 
+function toNullableNumber(value: unknown): number | null {
+  if (value === null || value === undefined) return null
+  const n = Number(value)
+  return Number.isFinite(n) ? n : null
+}
+
+function toNullableBoolean(value: unknown): boolean | null {
+  if (value === null || value === undefined) return null
+  if (typeof value === 'boolean') return value
+  return Number(value) !== 0
+}
+
+function toNullableString(value: unknown): string | null {
+  if (value === null || value === undefined) return null
+  return String(value)
+}
+
+function mapPredictionWindowRow(
+  row: Record<string, unknown>,
+): CollectedWindowRecord {
+  return {
+    slug: String(row.slug),
+    timeframe: String(row.timeframe) as PolymarketTimeframe,
+    conditionId: toNullableString(row.condition_id),
+    upTokenId: toNullableString(row.up_token_id),
+    downTokenId: toNullableString(row.down_token_id),
+    resolutionSource: String(row.resolution_source) as ResolutionSource,
+    startTimeMs: Number(row.start_time_ms),
+    endTimeMs: Number(row.end_time_ms),
+    openTwap: toNullableNumber(row.open_twap),
+    closeTwap: toNullableNumber(row.close_twap),
+    resolvedUp: toNullableBoolean(row.resolved_up),
+    tickSize: toNullableNumber(row.tick_size),
+    negRisk: Number(row.neg_risk ?? 0) !== 0,
+    volumeUsd: toNullableNumber(row.volume_usd),
+    updatedAt: Number(row.updated_at),
+  }
+}
+
+function mapWindowSnapshotRow(
+  row: Record<string, unknown>,
+): WindowSnapshotPoint {
+  return {
+    slug: String(row.slug),
+    capturedAtMs: Number(row.captured_at_ms),
+    secondsRemaining: Number(row.seconds_remaining),
+    twapPrice: toNullableNumber(row.twap_price),
+    binancePrice: toNullableNumber(row.binance_price),
+    sigma1m: toNullableNumber(row.sigma_1m),
+    basisBps: toNullableNumber(row.basis_bps),
+    yesBid: toNullableNumber(row.yes_bid),
+    yesAsk: toNullableNumber(row.yes_ask),
+    yesDepthUsd: toNullableNumber(row.yes_depth_usd),
+    noBid: toNullableNumber(row.no_bid),
+    noAsk: toNullableNumber(row.no_ask),
+    noDepthUsd: toNullableNumber(row.no_depth_usd),
+    pModelYes: toNullableNumber(row.p_model_yes),
+  }
+}
+
+function mapPredictionTradeRow(
+  row: Record<string, unknown>,
+): StoredPredictionTrade {
+  return {
+    id: String(row.id),
+    tenantId: String(row.tenant_id),
+    strategyId: String(row.strategy_id),
+    lane: String(row.lane) as PredictionStrategyLane,
+    mode: String(row.mode) as PredictionTradeMode,
+    slug: String(row.slug),
+    timeframe: String(row.timeframe) as PolymarketTimeframe,
+    outcome: row.outcome === 'NO' ? 'NO' : 'YES',
+    liquidityRole: row.liquidity_role === 'maker' ? 'maker' : 'taker',
+    entryTimeMs: Number(row.entry_time_ms),
+    entryPrice: Number(row.entry_price),
+    feeUsd: Number(row.fee_usd),
+    stakeUsd: Number(row.stake_usd),
+    shares: Number(row.shares),
+    pModel: Number(row.p_model),
+    pCalibrated: Number(row.p_calibrated),
+    markout30s: toNullableNumber(row.markout_30s),
+    resolvedUp: toNullableBoolean(row.resolved_up),
+    won: toNullableBoolean(row.won),
+    netPnlUsd: toNullableNumber(row.net_pnl_usd),
+    venueOrderId: toNullableString(row.venue_order_id),
+    status: String(row.status) as PredictionTradeStatus,
+  }
+}
+
+function mapStrategyStateRow(
+  row: Record<string, unknown>,
+): StoredStrategyState {
+  return {
+    tenantId: String(row.tenant_id),
+    strategyId: String(row.strategy_id),
+    mode: String(row.mode) as PredictionStrategyMode,
+    haltedReason: toNullableString(row.halted_reason),
+    updatedAt: Number(row.updated_at),
+  }
+}
+
 function mapOrderRow(row: Record<string, unknown>): ExchangeOrderRecord {
+  const filledQty = toNullableNumber(row.filled_qty)
+  const avgPrice = toNullableNumber(row.avg_price)
+  const fee = toNullableNumber(row.fee)
+  const feeAsset = toNullableString(row.fee_asset)
+  const presetId = toNullableString(row.preset_id)
+  const updatedAt = toNullableString(row.updated_at)
+
   return {
     id: String(row.id),
     clientOrderId:
@@ -131,11 +446,17 @@ function mapOrderRow(row: Record<string, unknown>): ExchangeOrderRecord {
         ? String(row.venue_order_id)
         : undefined,
     timestamp: String(row.timestamp),
+    updatedAt: updatedAt ?? undefined,
     pair: String(row.pair),
     side: row.side === 'SELL' ? 'SELL' : 'BUY',
     notionalUsd: Number(row.notional_usd),
     price: Number(row.price),
+    avgPrice: avgPrice ?? undefined,
     quantity: Number(row.quantity),
+    filledQty: filledQty ?? undefined,
+    fee: fee ?? undefined,
+    feeAsset: feeAsset ?? undefined,
+    presetId: presetId ?? undefined,
     status: String(row.status) as ExchangeOrderRecord['status'],
     mode: String(row.mode) as ExchangeOrderRecord['mode'],
     source: row.source === 'bot-auto' ? 'bot-auto' : 'manual',
@@ -143,6 +464,91 @@ function mapOrderRow(row: Record<string, unknown>): ExchangeOrderRecord {
       row.reason !== null && row.reason !== undefined
         ? String(row.reason)
         : undefined,
+  }
+}
+
+function mapTrainingRunRow(row: Record<string, unknown>): TrainingRunRecord {
+  return {
+    id: String(row.id),
+    tenantId: String(row.tenant_id),
+    clientRunId: String(row.client_run_id),
+    kind: String(row.kind) as TrainingRunKind,
+    presetId: String(row.preset_id),
+    strategyFamily: String(row.strategy_family) as StrategyFamily,
+    pair: String(row.pair),
+    timeframe: String(row.timeframe) as Interval,
+    fromTimeMs: Number(row.from_time_ms),
+    toTimeMs: Number(row.to_time_ms),
+    candleCount: Number(row.candle_count),
+    status: String(row.status) as TrainingRunStatus,
+    config: JSON.parse(String(row.config_json)) as TrainingConfig,
+    progress:
+      row.progress_json !== null && row.progress_json !== undefined
+        ? (JSON.parse(String(row.progress_json)) as TrainingProgress)
+        : null,
+    metrics:
+      row.metrics_json !== null && row.metrics_json !== undefined
+        ? (JSON.parse(String(row.metrics_json)) as TrainingRunMetrics)
+        : null,
+    folds:
+      row.folds_json !== null && row.folds_json !== undefined
+        ? (JSON.parse(String(row.folds_json)) as TrainingFoldResult[])
+        : null,
+    equity:
+      row.equity_json !== null && row.equity_json !== undefined
+        ? (JSON.parse(String(row.equity_json)) as TrainingEquityPoint[])
+        : null,
+    trades:
+      row.trades_json !== null && row.trades_json !== undefined
+        ? (JSON.parse(String(row.trades_json)) as TrainingTradeRecord[])
+        : null,
+    assumptions: JSON.parse(String(row.assumptions_json)) as TrainingAssumptions,
+    dataSource: String(row.data_source),
+    error: toNullableString(row.error),
+    createdAt: String(row.created_at),
+    completedAt: toNullableString(row.completed_at),
+  }
+}
+
+function mapRuntimeEventRow(row: Record<string, unknown>): RuntimeEventRecord {
+  return {
+    id: String(row.id),
+    tenantId: String(row.tenant_id),
+    timestamp: String(row.timestamp),
+    type: String(row.type) as RuntimeEventType,
+    severity: String(row.severity) as RuntimeEventSeverity,
+    message: String(row.message),
+    payload:
+      row.payload_json !== null && row.payload_json !== undefined
+        ? (JSON.parse(String(row.payload_json)) as Record<string, unknown>)
+        : null,
+    source: String(row.source),
+    correlationId: toNullableString(row.correlation_id),
+  }
+}
+
+function mapStrategyAuditRow(
+  row: Record<string, unknown>,
+): StrategyAuditRecord {
+  return {
+    id: String(row.id),
+    tenantId: String(row.tenant_id),
+    runId: String(row.run_id),
+    createdAt: String(row.created_at),
+    presetId: String(row.preset_id),
+    presetName: String(row.preset_name),
+    domain:
+      row.domain === 'prediction-market' ? 'prediction-market' : 'crypto-spot',
+    pair: String(row.pair),
+    timeframe: String(row.timeframe) as Interval,
+    fromTimeMs: Number(row.from_time_ms),
+    toTimeMs: Number(row.to_time_ms),
+    candles: Number(row.candles),
+    metrics: JSON.parse(String(row.metrics_json)) as StrategyAuditMetrics,
+    assumptions: JSON.parse(
+      String(row.assumptions_json),
+    ) as StrategyAuditAssumptions,
+    dataSource: String(row.data_source),
   }
 }
 
@@ -278,10 +684,21 @@ export class SqliteStateStore implements StateStore {
     if (this.closed) return
     this.db
       .prepare(
-        `INSERT OR REPLACE INTO orders (
+        `INSERT INTO orders (
           id, tenant_id, client_order_id, venue_order_id, timestamp,
-          pair, side, notional_usd, price, quantity, status, mode, source, reason
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          pair, side, notional_usd, price, quantity, status, mode, source, reason,
+          filled_qty, avg_price, fee, fee_asset, updated_at, preset_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(tenant_id, id) DO UPDATE SET
+          venue_order_id = excluded.venue_order_id,
+          status = excluded.status,
+          reason = excluded.reason,
+          filled_qty = excluded.filled_qty,
+          avg_price = excluded.avg_price,
+          fee = excluded.fee,
+          fee_asset = excluded.fee_asset,
+          updated_at = excluded.updated_at,
+          preset_id = COALESCE(excluded.preset_id, orders.preset_id)`,
       )
       .run(
         order.id,
@@ -298,6 +715,12 @@ export class SqliteStateStore implements StateStore {
         order.mode,
         order.source,
         order.reason ?? null,
+        order.filledQty ?? null,
+        order.avgPrice ?? null,
+        order.fee ?? null,
+        order.feeAsset ?? null,
+        order.updatedAt ?? order.timestamp,
+        order.presetId ?? null,
       )
   }
 
@@ -312,22 +735,84 @@ export class SqliteStateStore implements StateStore {
     tenantId: string,
     limit = 100,
   ): Promise<ExchangeOrderRecord[]> {
-    const safeLimit = Math.max(1, Math.min(1_000, Math.round(limit)))
+    return this.queryOrders(tenantId, { limit })
+  }
+
+  async queryOrders(
+    tenantId: string,
+    options: OrderQueryOptions = {},
+  ): Promise<ExchangeOrderRecord[]> {
+    if (this.closed) return []
+    const clauses: string[] = ['tenant_id = ?']
+    const params: (string | number)[] = [tenantId]
+
+    if (options.status) {
+      clauses.push('status = ?')
+      params.push(options.status)
+    }
+    if (options.pair) {
+      clauses.push('pair = ?')
+      params.push(options.pair)
+    }
+    if (options.side) {
+      clauses.push('side = ?')
+      params.push(options.side)
+    }
+    if (options.source) {
+      clauses.push('source = ?')
+      params.push(options.source)
+    }
+    if (options.presetId) {
+      clauses.push('preset_id = ?')
+      params.push(options.presetId)
+    }
+    if (options.mode) {
+      clauses.push('mode = ?')
+      params.push(options.mode)
+    }
+    if (options.before) {
+      clauses.push('timestamp < ?')
+      params.push(options.before)
+    }
+
+    const rawLimit =
+      options.limit !== undefined && Number.isFinite(options.limit)
+        ? options.limit
+        : 100
+    const safeLimit = Math.max(1, Math.min(1_000, Math.round(rawLimit)))
+    params.push(safeLimit)
+
     const rows = this.db
       .prepare(
         `SELECT * FROM orders
-         WHERE tenant_id = ?
-         ORDER BY timestamp DESC
+         WHERE ${clauses.join(' AND ')}
+         ORDER BY timestamp DESC, id DESC
          LIMIT ?`,
       )
-      .all(tenantId, safeLimit) as Record<string, unknown>[]
+      .all(...params) as Record<string, unknown>[]
     return rows.map(mapOrderRow)
+  }
+
+  async findOrderById(
+    tenantId: string,
+    orderId: string,
+  ): Promise<ExchangeOrderRecord | null> {
+    if (this.closed) return null
+    const row = this.db
+      .prepare(
+        `SELECT * FROM orders
+         WHERE tenant_id = ? AND id = ?
+         LIMIT 1`,
+      )
+      .get(tenantId, orderId) as Record<string, unknown> | undefined
+    return row ? mapOrderRow(row) : null
   }
 
   async findOrderByClientOrderId(
     tenantId: string,
     clientOrderId: string,
   ): Promise<ExchangeOrderRecord | null> {
+    if (this.closed) return null
     const row = this.db
       .prepare(
         `SELECT * FROM orders
@@ -336,6 +821,120 @@ export class SqliteStateStore implements StateStore {
       )
       .get(tenantId, clientOrderId) as Record<string, unknown> | undefined
     return row ? mapOrderRow(row) : null
+  }
+
+  appendRuntimeEventSync(event: RuntimeEventRecord): void {
+    if (this.closed) return
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO runtime_events (
+          id, tenant_id, timestamp, type, severity, message, payload_json, source, correlation_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        event.id,
+        event.tenantId,
+        event.timestamp,
+        event.type,
+        event.severity,
+        event.message,
+        event.payload ? JSON.stringify(event.payload) : null,
+        event.source,
+        event.correlationId ?? null,
+      )
+  }
+
+  async appendRuntimeEvent(event: RuntimeEventRecord): Promise<void> {
+    this.appendRuntimeEventSync(event)
+  }
+
+  async getRuntimeEvents(
+    tenantId: string,
+    options: RuntimeEventQueryOptions = {},
+  ): Promise<RuntimeEventRecord[]> {
+    if (this.closed) return []
+    const clauses: string[] = ['tenant_id = ?']
+    const params: (string | number)[] = [tenantId]
+
+    if (Array.isArray(options.types) && options.types.length > 0) {
+      const placeholders = options.types.map(() => '?').join(', ')
+      clauses.push(`type IN (${placeholders})`)
+      params.push(...options.types)
+    }
+    if (options.q && options.q.trim().length > 0) {
+      const needle = `%${options.q.trim().toLowerCase()}%`
+      clauses.push(
+        '(LOWER(message) LIKE ? OR LOWER(source) LIKE ? OR LOWER(COALESCE(correlation_id, \'\')) LIKE ?)',
+      )
+      params.push(needle, needle, needle)
+    }
+    if (options.before) {
+      clauses.push('timestamp < ?')
+      params.push(options.before)
+    }
+
+    const rawLimit =
+      options.limit !== undefined && Number.isFinite(options.limit)
+        ? options.limit
+        : 200
+    const safeLimit = Math.max(1, Math.min(2_000, Math.round(rawLimit)))
+    params.push(safeLimit)
+
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM runtime_events
+         WHERE ${clauses.join(' AND ')}
+         ORDER BY timestamp DESC, rowid DESC
+         LIMIT ?`,
+      )
+      .all(...params) as Record<string, unknown>[]
+    return rows.map(mapRuntimeEventRow)
+  }
+
+  async appendStrategyAudit(record: StrategyAuditRecord): Promise<void> {
+    if (this.closed) return
+    this.db
+      .prepare(
+        `INSERT OR REPLACE INTO strategy_audits (
+          id, tenant_id, run_id, created_at, preset_id, preset_name, domain,
+          pair, timeframe, from_time_ms, to_time_ms, candles, metrics_json,
+          assumptions_json, data_source
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        record.id,
+        record.tenantId,
+        record.runId,
+        record.createdAt,
+        record.presetId,
+        record.presetName,
+        record.domain,
+        record.pair,
+        record.timeframe,
+        record.fromTimeMs,
+        record.toTimeMs,
+        record.candles,
+        JSON.stringify(record.metrics),
+        JSON.stringify(record.assumptions),
+        record.dataSource,
+      )
+  }
+
+  async getLatestStrategyAudits(
+    tenantId: string,
+    limit = 64,
+  ): Promise<StrategyAuditRecord[]> {
+    if (this.closed) return []
+    const safeLimit = Math.max(1, Math.min(256, Math.round(limit)))
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM strategy_audits
+         WHERE tenant_id = ?
+         ORDER BY created_at DESC, rowid DESC
+         LIMIT ?`,
+      )
+      .all(tenantId, safeLimit) as Record<string, unknown>[]
+    return rows.map(mapStrategyAuditRow)
   }
 
   appendLedgerEntrySync(entry: LedgerEntry): void {
@@ -529,13 +1128,575 @@ export class SqliteStateStore implements StateStore {
       }))
   }
 
+  async getCandlesRange(
+    pair: string,
+    interval: Interval,
+    fromTimeMs: number,
+    toTimeMs: number,
+    limit = 5_000,
+  ): Promise<Candle[]> {
+    if (this.closed) return []
+    const safeLimit = Math.max(1, Math.min(5_000, Math.round(limit)))
+    const rows = this.db
+      .prepare(
+        `SELECT open_time_ms, open, high, low, close, volume
+         FROM candles_archive
+         WHERE pair = ? AND interval = ? AND open_time_ms >= ? AND open_time_ms <= ?
+         ORDER BY open_time_ms ASC
+         LIMIT ?`,
+      )
+      .all(pair, interval, fromTimeMs, toTimeMs, safeLimit) as Record<
+      string,
+      unknown
+    >[]
+    return rows.map((r) => ({
+      time: Number(r.open_time_ms),
+      open: Number(r.open),
+      high: Number(r.high),
+      low: Number(r.low),
+      close: Number(r.close),
+      volume: Number(r.volume),
+    }))
+  }
+
+  async createTrainingRun(
+    record: TrainingRunRecord,
+  ): Promise<{ record: TrainingRunRecord; deduplicated: boolean }> {
+    if (this.closed) return { record, deduplicated: false }
+    const existingRow = this.db
+      .prepare(
+        `SELECT * FROM training_runs
+         WHERE tenant_id = ? AND client_run_id = ?
+         LIMIT 1`,
+      )
+      .get(record.tenantId, record.clientRunId) as
+      | Record<string, unknown>
+      | undefined
+    if (existingRow) {
+      return { record: mapTrainingRunRow(existingRow), deduplicated: true }
+    }
+
+    const res = this.db
+      .prepare(
+        `INSERT OR IGNORE INTO training_runs (
+          id, tenant_id, client_run_id, kind, preset_id, strategy_family,
+          pair, timeframe, from_time_ms, to_time_ms, candle_count, status,
+          config_json, progress_json, metrics_json, folds_json, equity_json,
+          trades_json, assumptions_json, data_source, error, created_at, completed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        record.id,
+        record.tenantId,
+        record.clientRunId,
+        record.kind,
+        record.presetId,
+        record.strategyFamily,
+        record.pair,
+        record.timeframe,
+        record.fromTimeMs,
+        record.toTimeMs,
+        record.candleCount,
+        record.status,
+        JSON.stringify(record.config),
+        record.progress ? JSON.stringify(record.progress) : null,
+        record.metrics ? JSON.stringify(record.metrics) : null,
+        record.folds ? JSON.stringify(record.folds) : null,
+        record.equity ? JSON.stringify(record.equity) : null,
+        record.trades ? JSON.stringify(record.trades) : null,
+        JSON.stringify(record.assumptions),
+        record.dataSource,
+        record.error ?? null,
+        record.createdAt,
+        record.completedAt ?? null,
+      )
+
+    if (Number(res.changes ?? 0) === 0) {
+      const winner = this.db
+        .prepare(
+          `SELECT * FROM training_runs
+           WHERE tenant_id = ? AND client_run_id = ?
+           LIMIT 1`,
+        )
+        .get(record.tenantId, record.clientRunId) as
+        | Record<string, unknown>
+        | undefined
+      if (winner) {
+        return { record: mapTrainingRunRow(winner), deduplicated: true }
+      }
+    }
+
+    const stored = await this.getTrainingRunById(record.tenantId, record.id)
+    return { record: stored ?? record, deduplicated: false }
+  }
+
+  async updateTrainingRun(
+    tenantId: string,
+    id: string,
+    patch: UpdateTrainingRunPatch,
+  ): Promise<TrainingRunRecord | null> {
+    if (this.closed) return null
+    const sets: string[] = []
+    const params: (string | number | null)[] = []
+
+    if (patch.status !== undefined) {
+      sets.push('status = ?')
+      params.push(patch.status)
+    }
+    if (patch.candleCount !== undefined) {
+      sets.push('candle_count = ?')
+      params.push(patch.candleCount)
+    }
+    if (patch.progress !== undefined) {
+      sets.push('progress_json = ?')
+      params.push(patch.progress ? JSON.stringify(patch.progress) : null)
+    }
+    if (patch.metrics !== undefined) {
+      sets.push('metrics_json = ?')
+      params.push(patch.metrics ? JSON.stringify(patch.metrics) : null)
+    }
+    if (patch.folds !== undefined) {
+      sets.push('folds_json = ?')
+      params.push(patch.folds ? JSON.stringify(patch.folds) : null)
+    }
+    if (patch.equity !== undefined) {
+      sets.push('equity_json = ?')
+      params.push(patch.equity ? JSON.stringify(patch.equity) : null)
+    }
+    if (patch.trades !== undefined) {
+      sets.push('trades_json = ?')
+      params.push(patch.trades ? JSON.stringify(patch.trades) : null)
+    }
+    if (patch.dataSource !== undefined) {
+      sets.push('data_source = ?')
+      params.push(patch.dataSource)
+    }
+    if (patch.error !== undefined) {
+      sets.push('error = ?')
+      params.push(patch.error)
+    }
+    if (patch.completedAt !== undefined) {
+      sets.push('completed_at = ?')
+      params.push(patch.completedAt)
+    }
+
+    if (sets.length === 0) {
+      return this.getTrainingRunById(tenantId, id)
+    }
+
+    params.push(tenantId, id)
+    this.db
+      .prepare(
+        `UPDATE training_runs
+         SET ${sets.join(', ')}
+         WHERE tenant_id = ? AND id = ?`,
+      )
+      .run(...params)
+
+    return this.getTrainingRunById(tenantId, id)
+  }
+
+  async getTrainingRunById(
+    tenantId: string,
+    id: string,
+  ): Promise<TrainingRunRecord | null> {
+    if (this.closed) return null
+    const row = this.db
+      .prepare(
+        `SELECT * FROM training_runs
+         WHERE tenant_id = ? AND id = ?
+         LIMIT 1`,
+      )
+      .get(tenantId, id) as Record<string, unknown> | undefined
+    return row ? mapTrainingRunRow(row) : null
+  }
+
+  async listTrainingRuns(
+    tenantId: string,
+    options: TrainingRunQueryOptions = {},
+  ): Promise<TrainingRunRecord[]> {
+    if (this.closed) return []
+    const clauses: string[] = ['tenant_id = ?']
+    const params: (string | number)[] = [tenantId]
+
+    if (options.presetId) {
+      clauses.push('preset_id = ?')
+      params.push(options.presetId)
+    }
+    const rawLimit =
+      options.limit !== undefined && Number.isFinite(options.limit)
+        ? options.limit
+        : 50
+    const safeLimit = Math.max(1, Math.min(500, Math.round(rawLimit)))
+    params.push(safeLimit)
+
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM training_runs
+         WHERE ${clauses.join(' AND ')}
+         ORDER BY created_at DESC, rowid DESC
+         LIMIT ?`,
+      )
+      .all(...params) as Record<string, unknown>[]
+    return rows.map(mapTrainingRunRow)
+  }
+
+  async markRunningTrainingRunsInterrupted(tenantId?: string): Promise<number> {
+    if (this.closed) return 0
+    const nowIso = new Date().toISOString()
+    const res = tenantId
+      ? this.db
+          .prepare(
+            `UPDATE training_runs
+             SET status = 'interrupted',
+                 error = COALESCE(error, 'Run interrupted before completion'),
+                 completed_at = COALESCE(completed_at, ?)
+             WHERE status = 'running' AND tenant_id = ?`,
+          )
+          .run(nowIso, tenantId)
+      : this.db
+          .prepare(
+            `UPDATE training_runs
+             SET status = 'interrupted',
+                 error = COALESCE(error, 'Run interrupted before completion'),
+                 completed_at = COALESCE(completed_at, ?)
+             WHERE status = 'running'`,
+          )
+          .run(nowIso)
+    return Number(res.changes ?? 0)
+  }
+
+  async upsertPredictionWindow(window: CollectedWindowRecord): Promise<void> {
+    if (this.closed) return
+    this.db
+      .prepare(
+        `INSERT INTO prediction_windows (
+          slug, timeframe, condition_id, up_token_id, down_token_id,
+          resolution_source, start_time_ms, end_time_ms, open_twap, close_twap,
+          resolved_up, tick_size, neg_risk, volume_usd, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(slug) DO UPDATE SET
+          timeframe = excluded.timeframe,
+          condition_id = COALESCE(excluded.condition_id, prediction_windows.condition_id),
+          up_token_id = COALESCE(excluded.up_token_id, prediction_windows.up_token_id),
+          down_token_id = COALESCE(excluded.down_token_id, prediction_windows.down_token_id),
+          resolution_source = CASE
+            WHEN excluded.resolution_source = 'unknown' THEN prediction_windows.resolution_source
+            ELSE excluded.resolution_source
+          END,
+          start_time_ms = excluded.start_time_ms,
+          end_time_ms = excluded.end_time_ms,
+          open_twap = COALESCE(excluded.open_twap, prediction_windows.open_twap),
+          close_twap = COALESCE(excluded.close_twap, prediction_windows.close_twap),
+          resolved_up = COALESCE(excluded.resolved_up, prediction_windows.resolved_up),
+          tick_size = COALESCE(excluded.tick_size, prediction_windows.tick_size),
+          neg_risk = excluded.neg_risk,
+          volume_usd = COALESCE(excluded.volume_usd, prediction_windows.volume_usd),
+          updated_at = excluded.updated_at`,
+      )
+      .run(
+        window.slug,
+        window.timeframe,
+        window.conditionId ?? null,
+        window.upTokenId ?? null,
+        window.downTokenId ?? null,
+        window.resolutionSource,
+        window.startTimeMs,
+        window.endTimeMs,
+        window.openTwap ?? null,
+        window.closeTwap ?? null,
+        window.resolvedUp === null ? null : window.resolvedUp ? 1 : 0,
+        window.tickSize ?? null,
+        window.negRisk ? 1 : 0,
+        window.volumeUsd ?? null,
+        window.updatedAt,
+      )
+  }
+
+  async getPredictionWindows(
+    options: PredictionWindowQueryOptions = {},
+  ): Promise<CollectedWindowRecord[]> {
+    if (this.closed) return []
+    if (options.settledOnly && options.unsettledOnly) return []
+
+    const clauses: string[] = []
+    const params: (string | number)[] = []
+
+    if (options.timeframe) {
+      clauses.push('timeframe = ?')
+      params.push(options.timeframe)
+    }
+    if (options.slug) {
+      clauses.push('slug = ?')
+      params.push(options.slug)
+    }
+    if (options.settledOnly) {
+      clauses.push('resolved_up IS NOT NULL')
+    }
+    if (options.unsettledOnly) {
+      clauses.push('resolved_up IS NULL')
+    }
+    if (options.sinceMs !== undefined && Number.isFinite(options.sinceMs)) {
+      clauses.push('start_time_ms >= ?')
+      params.push(options.sinceMs)
+    }
+    if (options.untilMs !== undefined && Number.isFinite(options.untilMs)) {
+      clauses.push('start_time_ms <= ?')
+      params.push(options.untilMs)
+    }
+
+    const whereSql = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : ''
+    const dir = options.order === 'asc' ? 'ASC' : 'DESC'
+    const rawLimit =
+      options.limit !== undefined && Number.isFinite(options.limit)
+        ? options.limit
+        : 2_000
+    const safeLimit = Math.max(1, Math.min(10_000, Math.round(rawLimit)))
+    params.push(safeLimit)
+
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM prediction_windows
+         ${whereSql}
+         ORDER BY start_time_ms ${dir}, slug ${dir}
+         LIMIT ?`,
+      )
+      .all(...params) as Record<string, unknown>[]
+    return rows.map(mapPredictionWindowRow)
+  }
+
+  async getSettledWindowCount(
+    timeframe?: PolymarketTimeframe,
+  ): Promise<number> {
+    if (this.closed) return 0
+    const row = timeframe
+      ? (this.db
+          .prepare(
+            `SELECT COUNT(*) AS cnt FROM prediction_windows
+             WHERE resolved_up IS NOT NULL AND timeframe = ?`,
+          )
+          .get(timeframe) as { cnt: number } | undefined)
+      : (this.db
+          .prepare(
+            `SELECT COUNT(*) AS cnt FROM prediction_windows
+             WHERE resolved_up IS NOT NULL`,
+          )
+          .get() as { cnt: number } | undefined)
+    return Number(row?.cnt ?? 0)
+  }
+
+  async appendPredictionSnapshot(snapshot: WindowSnapshotPoint): Promise<void> {
+    if (this.closed) return
+    this.db
+      .prepare(
+        `INSERT INTO prediction_window_snapshots (
+          slug, captured_at_ms, seconds_remaining, twap_price, binance_price,
+          sigma_1m, basis_bps, yes_bid, yes_ask, yes_depth_usd,
+          no_bid, no_ask, no_depth_usd, p_model_yes
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(slug, captured_at_ms) DO UPDATE SET
+          seconds_remaining = excluded.seconds_remaining,
+          twap_price = excluded.twap_price,
+          binance_price = excluded.binance_price,
+          sigma_1m = excluded.sigma_1m,
+          basis_bps = excluded.basis_bps,
+          yes_bid = excluded.yes_bid,
+          yes_ask = excluded.yes_ask,
+          yes_depth_usd = excluded.yes_depth_usd,
+          no_bid = excluded.no_bid,
+          no_ask = excluded.no_ask,
+          no_depth_usd = excluded.no_depth_usd,
+          p_model_yes = excluded.p_model_yes`,
+      )
+      .run(
+        snapshot.slug,
+        snapshot.capturedAtMs,
+        snapshot.secondsRemaining,
+        snapshot.twapPrice ?? null,
+        snapshot.binancePrice ?? null,
+        snapshot.sigma1m ?? null,
+        snapshot.basisBps ?? null,
+        snapshot.yesBid ?? null,
+        snapshot.yesAsk ?? null,
+        snapshot.yesDepthUsd ?? null,
+        snapshot.noBid ?? null,
+        snapshot.noAsk ?? null,
+        snapshot.noDepthUsd ?? null,
+        snapshot.pModelYes ?? null,
+      )
+  }
+
+  async getPredictionSnapshots(slug: string): Promise<WindowSnapshotPoint[]> {
+    if (this.closed) return []
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM prediction_window_snapshots
+         WHERE slug = ?
+         ORDER BY captured_at_ms ASC`,
+      )
+      .all(slug) as Record<string, unknown>[]
+    return rows.map(mapWindowSnapshotRow)
+  }
+
+  async upsertPredictionTrade(trade: StoredPredictionTrade): Promise<void> {
+    if (this.closed) return
+    this.db
+      .prepare(
+        `INSERT INTO prediction_shadow_trades (
+          id, tenant_id, strategy_id, lane, mode, slug, timeframe, outcome,
+          liquidity_role, entry_time_ms, entry_price, fee_usd, stake_usd,
+          shares, p_model, p_calibrated, markout_30s, resolved_up, won,
+          net_pnl_usd, venue_order_id, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          tenant_id = excluded.tenant_id,
+          strategy_id = excluded.strategy_id,
+          lane = excluded.lane,
+          mode = excluded.mode,
+          slug = excluded.slug,
+          timeframe = excluded.timeframe,
+          outcome = excluded.outcome,
+          liquidity_role = excluded.liquidity_role,
+          entry_time_ms = excluded.entry_time_ms,
+          entry_price = excluded.entry_price,
+          fee_usd = excluded.fee_usd,
+          stake_usd = excluded.stake_usd,
+          shares = excluded.shares,
+          p_model = excluded.p_model,
+          p_calibrated = excluded.p_calibrated,
+          markout_30s = excluded.markout_30s,
+          resolved_up = excluded.resolved_up,
+          won = excluded.won,
+          net_pnl_usd = excluded.net_pnl_usd,
+          venue_order_id = excluded.venue_order_id,
+          status = excluded.status`,
+      )
+      .run(
+        trade.id,
+        trade.tenantId,
+        trade.strategyId,
+        trade.lane,
+        trade.mode,
+        trade.slug,
+        trade.timeframe,
+        trade.outcome,
+        trade.liquidityRole,
+        trade.entryTimeMs,
+        trade.entryPrice,
+        trade.feeUsd,
+        trade.stakeUsd,
+        trade.shares,
+        trade.pModel,
+        trade.pCalibrated,
+        trade.markout30s ?? null,
+        trade.resolvedUp === null ? null : trade.resolvedUp ? 1 : 0,
+        trade.won === null ? null : trade.won ? 1 : 0,
+        trade.netPnlUsd ?? null,
+        trade.venueOrderId ?? null,
+        trade.status,
+      )
+  }
+
+  async getPredictionTrades(
+    tenantId: string,
+    options: PredictionTradeQueryOptions = {},
+  ): Promise<StoredPredictionTrade[]> {
+    if (this.closed) return []
+    const clauses: string[] = ['tenant_id = ?']
+    const params: (string | number)[] = [tenantId]
+
+    if (options.strategyId) {
+      clauses.push('strategy_id = ?')
+      params.push(options.strategyId)
+    }
+    if (options.slug) {
+      clauses.push('slug = ?')
+      params.push(options.slug)
+    }
+    if (options.timeframe) {
+      clauses.push('timeframe = ?')
+      params.push(options.timeframe)
+    }
+    if (options.mode) {
+      clauses.push('mode = ?')
+      params.push(options.mode)
+    }
+    if (options.status) {
+      clauses.push('status = ?')
+      params.push(options.status)
+    }
+    if (
+      options.sinceEntryTimeMs !== undefined &&
+      Number.isFinite(options.sinceEntryTimeMs)
+    ) {
+      clauses.push('entry_time_ms >= ?')
+      params.push(options.sinceEntryTimeMs)
+    }
+
+    const rawLimit =
+      options.limit !== undefined && Number.isFinite(options.limit)
+        ? options.limit
+        : 200
+    const safeLimit = Math.max(1, Math.min(5_000, Math.round(rawLimit)))
+    params.push(safeLimit)
+
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM prediction_shadow_trades
+         WHERE ${clauses.join(' AND ')}
+         ORDER BY entry_time_ms DESC, id DESC
+         LIMIT ?`,
+      )
+      .all(...params) as Record<string, unknown>[]
+    return rows.map(mapPredictionTradeRow)
+  }
+
+  async setStrategyModeState(state: StoredStrategyState): Promise<void> {
+    if (this.closed) return
+    this.db
+      .prepare(
+        `INSERT INTO prediction_strategy_states (
+          tenant_id, strategy_id, mode, halted_reason, updated_at
+        ) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(tenant_id, strategy_id) DO UPDATE SET
+          mode = excluded.mode,
+          halted_reason = excluded.halted_reason,
+          updated_at = excluded.updated_at`,
+      )
+      .run(
+        state.tenantId,
+        state.strategyId,
+        state.mode,
+        state.haltedReason ?? null,
+        state.updatedAt,
+      )
+  }
+
+  async getStrategyModeStates(
+    tenantId: string,
+  ): Promise<StoredStrategyState[]> {
+    if (this.closed) return []
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM prediction_strategy_states
+         WHERE tenant_id = ?
+         ORDER BY strategy_id ASC`,
+      )
+      .all(tenantId) as Record<string, unknown>[]
+    return rows.map(mapStrategyStateRow)
+  }
+
   async pruneRetention(
     retentionDays = DEFAULT_RETENTION_DAYS,
     nowMs = Date.now(),
+    windowRetentionDays = DEFAULT_WINDOW_RETENTION_DAYS,
   ): Promise<RetentionPruneReport> {
     const safeDays = Math.max(1, Math.round(retentionDays))
+    const safeWindowDays = Math.max(1, Math.round(windowRetentionDays))
     const cutoffMs = nowMs - safeDays * 86_400_000
     const cutoffIso = new Date(cutoffMs).toISOString()
+    const windowCutoffMs = nowMs - safeWindowDays * 86_400_000
+    const windowCutoffIso = new Date(windowCutoffMs).toISOString()
 
     const delOrders = this.db
       .prepare('DELETE FROM orders WHERE timestamp < ?')
@@ -546,6 +1707,22 @@ export class SqliteStateStore implements StateStore {
     const delCandles = this.db
       .prepare('DELETE FROM candles_archive WHERE open_time_ms < ?')
       .run(cutoffMs)
+    const delSnapshots = this.db
+      .prepare(
+        `DELETE FROM prediction_window_snapshots
+         WHERE captured_at_ms < ?
+            OR slug IN (SELECT slug FROM prediction_windows WHERE end_time_ms < ?)`,
+      )
+      .run(windowCutoffMs, windowCutoffMs)
+    const delWindows = this.db
+      .prepare('DELETE FROM prediction_windows WHERE end_time_ms < ?')
+      .run(windowCutoffMs)
+    const delPredTrades = this.db
+      .prepare(
+        `DELETE FROM prediction_shadow_trades
+         WHERE entry_time_ms < ? AND status != 'OPEN'`,
+      )
+      .run(windowCutoffMs)
 
     return {
       retentionDays: safeDays,
@@ -553,6 +1730,11 @@ export class SqliteStateStore implements StateStore {
       deletedOrders: Number(delOrders.changes ?? 0),
       deletedAuditEvents: Number(delAudit.changes ?? 0),
       deletedCandles: Number(delCandles.changes ?? 0),
+      windowRetentionDays: safeWindowDays,
+      windowCutoffIso,
+      deletedPredictionWindows: Number(delWindows.changes ?? 0),
+      deletedPredictionSnapshots: Number(delSnapshots.changes ?? 0),
+      deletedPredictionTrades: Number(delPredTrades.changes ?? 0),
     }
   }
 

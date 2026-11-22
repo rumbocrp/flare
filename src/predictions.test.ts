@@ -4,6 +4,7 @@ import {
   BITCOIN_20_PREDICTIONS,
   computeWilsonLowerBoundPct,
   evaluatePredictionRule,
+  evaluatePredictionRuleDetailed,
   evaluateTimeframePredictions,
 } from './predictions'
 import type { Interval } from './types'
@@ -71,5 +72,26 @@ describe('predictions engine (Bitcoin 20 Prediction Market Rules)', () => {
     )
     expect(stats.wilsonLowerBoundPct).toBeGreaterThan(0)
     expect(stats.recentOutcomes.length).toBe(Math.min(16, stats.triggers))
+  })
+
+  it('returns per-trigger events and cumulative win-rate series for rule detail disclosure', async () => {
+    const candles = await syntheticSource.getCandles({
+      pair: 'BTC/USDT',
+      interval: '5m',
+      limit: 400,
+    })
+    const rule = BITCOIN_20_PREDICTIONS.find(
+      (r) => r.id === 'm5-ema50-bear-cap',
+    )!
+    const base = evaluatePredictionRule(rule, candles)
+    const detailed = evaluatePredictionRuleDetailed(rule, candles)
+
+    expect(detailed.stats).toEqual(base)
+    expect(detailed.events).toHaveLength(base.triggers)
+    for (const ev of detailed.events) {
+      expect(ev.resolveIndex).toBe(ev.index + rule.horizonBars)
+      expect(ev.cumulativeWinRatePct).toBeGreaterThanOrEqual(0)
+      expect(ev.cumulativeWinRatePct).toBeLessThanOrEqual(100)
+    }
   })
 })

@@ -1,5 +1,11 @@
 import { binanceSource } from '../market/binance'
+import { intervalMs } from '../market/intervals'
+import type {
+  HistoricalCandlesMissingSpan,
+  HistoricalCandlesResponse,
+} from '../training/types'
 import type { Candle, Interval, MarketDataSource } from '../types'
+import { getStateStore } from './store'
 
 export type DataSourceKind = 'binance' | 'binance-cache'
 
@@ -242,4 +248,159 @@ export function clearCandleCache(): void {
   binanceErrors = 0
   totalLatencyMs = 0
   latencySamples = 0
+}
+
+export const MAX_HISTORY_BARS = 5_000
+const HISTORY_PAGE_SIZE = 1_000
+
+/**
+ * Fetches historical candles over `[fromTimeMs, toTimeMs]` cleanly:
+ * 1. Reads existing archived bars from `candles_archive` first.
+ * 2. Computes only missing spans and fetches them from upstream Binance in pages <= 1,000.
+ * 3. Upserts fetched bars back into `candles_archive`.
+ * 4. Never fills synthetically — if any page fails, returns the partial range with
+ *    `complete: false` and explicit `missingSpans`.
+ */
+export async function fetchHistoricalCandles(
+  pair: string,
+  interval: Interval,
+  fromTimeMs: number,
+  toTimeMs: number,
+  options?: { nowMs?: number },
+): Promise<HistoricalCandlesResponse> {
+  const stepMs = intervalMs[interval]
+  const nowMs = options?.nowMs ?? Date.now()
+
+  if (
+    !Number.isFinite(fromTimeMs) ||
+    !Number.isFinite(toTimeMs) ||
+    fromTimeMs < 0 ||
+    fromTimeMs >= toTimeMs
+  ) {
+    throw new Error('Invalid historical candle range: `from` must be strictly less than `to`.')
+  }
+  if (toTimeMs > nowMs + stepMs) {
+    throw new Error('Historical candle range cannot end in the future.')
+  }
+  const estimatedBars = Math.floor((toTimeMs - fromTimeMs) / stepMs) + 1
+  if (estimatedBars > MAX_HISTORY_BARS) {
+    throw new Error(
+      `Historical candle range spans ~${estimatedBars} bars, exceeding the ${MAX_HISTORY_BARS}-bar limit.`,
+    )
+  }
+
+  const normalizedPair = pair.toUpperCase()
+  const store = getStateStore()
+  const archived = await store
+    .getCandlesRange(normalizedPair, interval, fromTimeMs, toTimeMs, MAX_HISTORY_BARS)
+    .catch(() => [] as Candle[])
+
+  const merged = new Map<number, Candle>()
+  for (const c of archived) {
+    if (c.time >= fromTimeMs && c.time <= toTimeMs) {
+      merged.set(c.time, c)
+    }
+  }
+  const cachedBars = merged.size
+
+  // Identify missing spans relative to archived bars
+  const spansToFetch: { from: number; to: number }[] = []
+  const archivedSorted = Array.from(merged.values()).sort((a, b) => a.time - b.time)
+
+  if (archivedSorted.length === 0) {
+    spansToFetch.push({ from: fromTimeMs, to: toTimeMs })
+  } else {
+    const firstArchived = archivedSorted[0].time
+    if (firstArchived - fromTimeMs >= stepMs) {
+      spansToFetch.push({ from: fromTimeMs, to: firstArchived - stepMs })
+    }
+    for (let i = 1; i < archivedSorted.length; i += 1) {
+      const prevTime = archivedSorted[i - 1].time
+      const curTime = archivedSorted[i].time
+      if (curTime - prevTime > stepMs * 1.5) {
+        spansToFetch.push({ from: prevTime + stepMs, to: curTime - stepMs })
+      }
+    }
+    const lastArchived = archivedSorted[archivedSorted.length - 1].time
+    if (toTimeMs - lastArchived >= stepMs) {
+      spansToFetch.push({ from: lastArchived + stepMs, to: toTimeMs })
+    }
+  }
+
+  const missingSpans: HistoricalCandlesMissingSpan[] = []
+  const newlyFetched: Candle[] = []
+
+  for (const span of spansToFetch) {
+    if (span.from > span.to) continue
+    // Page forward in <= 1,000 bar windows so partial failures report exact missing span
+    let cursor = span.from
+    while (cursor <= span.to) {
+      const pageEnd = Math.min(span.to, cursor + (HISTORY_PAGE_SIZE - 1) * stepMs)
+      const expectedPageBars = Math.min(
+        HISTORY_PAGE_SIZE,
+        Math.max(1, Math.floor((pageEnd - cursor) / stepMs) + 1),
+      )
+
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), BINANCE_TIMEOUT_MS * 2)
+      try {
+        const pageBars = await activeMarketSource.getCandles({
+          pair: normalizedPair,
+          interval,
+          limit: expectedPageBars,
+          from: cursor,
+          to: pageEnd,
+          signal: controller.signal,
+        })
+        clearTimeout(timeoutId)
+
+        for (const c of pageBars) {
+          if (c.time >= fromTimeMs && c.time <= toTimeMs) {
+            if (!merged.has(c.time)) {
+              newlyFetched.push(c)
+            }
+            merged.set(c.time, c)
+          }
+        }
+      } catch (err) {
+        clearTimeout(timeoutId)
+        binanceErrors += 1
+        missingSpans.push({
+          fromTimeMs: cursor,
+          toTimeMs: pageEnd,
+          reason: err instanceof Error ? err.message : String(err),
+        })
+      }
+
+      cursor = pageEnd + stepMs
+    }
+  }
+
+  if (newlyFetched.length > 0) {
+    await store.upsertCandles(normalizedPair, interval, newlyFetched).catch(() => {})
+  }
+
+  const candles = Array.from(merged.values())
+    .sort((a, b) => a.time - b.time)
+    .slice(0, MAX_HISTORY_BARS)
+
+  const source: HistoricalCandlesResponse['source'] =
+    newlyFetched.length === 0
+      ? 'candles-archive'
+      : cachedBars === 0
+        ? 'binance'
+        : 'binance+archive'
+
+  return {
+    pair: normalizedPair,
+    interval,
+    fromTimeMs,
+    toTimeMs,
+    candles,
+    complete: missingSpans.length === 0,
+    missingSpans,
+    source,
+    fetchedBars: newlyFetched.length,
+    cachedBars,
+  }
 }

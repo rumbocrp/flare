@@ -1,0 +1,268 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - generic [ref=e6]:
+      - button "Back to Dashboard" [ref=e463] [cursor=pointer]:
+        - generic [ref=e464]: Dashboard
+      - generic [ref=e7]: FLARE
+      - generic [aria-hidden] [ref=e12]: /
+      - generic [ref=e13]: Training
+  - main [ref=e14]:
+    - generic [ref=e465]:
+      - generic [ref=e466]:
+        - heading "Training" [level=1] [ref=e467]
+        - button "Run training" [ref=e469] [cursor=pointer]
+      - region "Active training run status" [ref=e471]:
+        - generic [ref=e473]:
+          - generic [ref=e474]: COMPLETED
+          - generic [ref=e479]: 1. BTC 5m Scalp
+          - generic [ref=e480]: BTC/USDT · 5m
+          - generic [ref=e481]: 2026-11-08 00:00 → 2026-11-22 23:54
+      - generic [ref=e482]:
+        - complementary "Strategy catalog" [ref=e483]:
+          - generic [ref=e484]:
+            - generic [ref=e485]:
+              - button "Strategy catalog" [expanded] [ref=e486] [cursor=pointer]
+              - generic [ref=e490]: 1/13
+            - generic [ref=e491]:
+              - textbox "Search strategies, pairs, timeframes…" [ref=e493]
+              - group "Filter by strategy family" [ref=e494]:
+                - button "All" [ref=e495] [cursor=pointer]
+                - button "Trend / Momentum" [ref=e496] [cursor=pointer]
+                - button "Mean Reversion" [ref=e497] [cursor=pointer]
+                - button "Support & Resistance" [ref=e498] [cursor=pointer]
+                - button "Break of Structure" [ref=e499] [cursor=pointer]
+                - button "Donchian Breakout" [ref=e500] [cursor=pointer]
+                - button "Prediction Market" [ref=e501] [cursor=pointer]
+              - generic [ref=e577]:
+                - heading "Donchian Breakout" [level=3] [ref=e578]
+                - button "9. BTC 1h Donchian Breakout No run BTC/USDT · 1h" [ref=e580] [cursor=pointer]:
+                  - generic [ref=e581]:
+                    - generic [ref=e582]: 9. BTC 1h Donchian Breakout
+                    - generic [ref=e583]: No run
+                  - generic [ref=e584]: BTC/USDT · 1h
+        - generic [ref=e607]:
+          - region "Run configuration" [ref=e608]:
+            - generic [ref=e609]:
+              - heading "Run configuration" [level=2] [ref=e611]
+              - button "Run training" [ref=e612] [cursor=pointer]
+            - generic [ref=e614]:
+              - generic [ref=e615]:
+                - generic [ref=e616]: Run kind
+                - combobox "Run kind" [ref=e617] [cursor=pointer]:
+                  - generic: Walk-Forward (Fit → Val → Test)
+              - generic [ref=e620]:
+                - generic [ref=e621]: Pair
+                - combobox "Pair" [ref=e622] [cursor=pointer]:
+                  - generic: BTC/USDT
+              - generic [ref=e625]:
+                - generic [ref=e626]: Timeframe
+                - combobox "Timeframe" [ref=e627] [cursor=pointer]:
+                  - generic: 5m
+              - generic [ref=e630]:
+                - generic [ref=e631]: Date range (UTC)
+                - generic [ref=e632]:
+                  - button "30d" [ref=e633] [cursor=pointer]
+                  - button "90d" [ref=e634] [cursor=pointer]
+                  - button "180d" [ref=e635] [cursor=pointer]
+                  - button "365d" [ref=e636] [cursor=pointer]
+                  - button "Custom" [ref=e637] [cursor=pointer]
+            - generic [ref=e638]:
+              - generic [ref=e639]:
+                - generic [ref=e640]: From (UTC)
+                - textbox "From (UTC)" [ref=e641]: 2026-11-08
+              - generic [ref=e642]:
+                - generic [ref=e643]: To (UTC)
+                - textbox "To (UTC)" [ref=e644]: 2026-11-22
+            - generic [ref=e645]:
+              - generic [ref=e646]:
+                - generic [ref=e647]: Folds
+                - combobox "Folds" [ref=e648] [cursor=pointer]:
+                  - generic: "5"
+              - generic [ref=e651]:
+                - generic [ref=e652]: Window mode
+                - combobox "Window mode" [ref=e653] [cursor=pointer]:
+                  - generic: Anchored
+              - generic [ref=e656]:
+                - generic [ref=e657]: Train %
+                - spinbutton "Train %" [ref=e658]: "55"
+              - generic [ref=e659]:
+                - generic [ref=e660]: Val %
+                - spinbutton "Val %" [ref=e661]: "20"
+              - generic [ref=e662]:
+                - generic [ref=e663]: Test %
+                - spinbutton "Test %" [ref=e664]: "25"
+              - generic [ref=e665]:
+                - generic [ref=e666]: Purge bars
+                - spinbutton "Purge bars" [ref=e667]: "5"
+              - generic [ref=e668]:
+                - generic [ref=e669]: Fee %
+                - spinbutton "Fee %" [ref=e670]: "0.04"
+              - generic [ref=e671]:
+                - generic [ref=e672]: Slip %
+                - spinbutton "Slip %" [ref=e673]: "0.01"
+            - generic [ref=e674]:
+              - generic [ref=e675]:
+                - generic [ref=e676]:
+                  - generic [ref=e677]: Initial balance ($)
+                  - spinbutton "Initial balance ($)" [ref=e678]: "10000"
+                - generic [ref=e679]:
+                  - switch "Allow short" [checked] [ref=e680] [cursor=pointer]
+                  - generic [ref=e681] [cursor=pointer]: Allow short
+              - generic [ref=e682]:
+                - generic [ref=e683]: "Estimated: 4319 / 5000 candles"
+                - generic [ref=e684]: "Test fold: ~1d 20h"
+            - generic [ref=e685]:
+              - generic [ref=e686]: Total window is 15 days (< 60 days). Out-of-sample reliability may be limited.
+              - generic [ref=e690]: Each held-out test fold is ~1d 20h (< 14 days).
+          - generic [ref=e694]:
+            - tablist [ref=e695]:
+              - tab "Overview" [ref=e696] [cursor=pointer]
+              - tab "Folds" [active] [selected] [ref=e697] [cursor=pointer]
+              - tab "Trades" [ref=e698] [cursor=pointer]
+              - tab "Equity" [ref=e699] [cursor=pointer]
+              - tab "Backtest" [ref=e700] [cursor=pointer]
+            - tabpanel "Folds" [ref=e726]:
+              - generic [ref=e727]:
+                - region "Chronological split timeline (Train → Validate → Test)" [ref=e728]:
+                  - generic [ref=e729]:
+                    - heading "Chronological split timeline (Train → Validate → Test)" [level=3] [ref=e730]
+                    - generic [ref=e731]:
+                      - generic [ref=e732]: Train
+                      - generic [ref=e735]: Validate
+                      - generic [ref=e738]: Test (OOS)
+                  - generic [ref=e741]:
+                    - generic [ref=e742]:
+                      - generic [ref=e743]: Fold 1
+                      - generic [ref=e744]:
+                        - 'generic "Train: 2026-11-08 00:00 → 2026-11-12 02:10 (1179)" [ref=e745]'
+                        - 'generic "Validate: 2026-11-12 02:40 → 2026-11-13 14:30 (431)" [ref=e746]'
+                        - 'generic "Test (OOS): 2026-11-13 15:00 → 2026-11-15 11:50 (539)" [ref=e747]'
+                      - generic [ref=e748]: +$14.36
+                    - generic [ref=e749]:
+                      - generic [ref=e750]: Fold 2
+                      - generic [ref=e751]:
+                        - 'generic "Train: 2026-11-08 00:00 → 2026-11-13 23:05 (1718)" [ref=e752]'
+                        - 'generic "Validate: 2026-11-13 23:35 → 2026-11-15 11:25 (431)" [ref=e753]'
+                        - 'generic "Test (OOS): 2026-11-15 11:55 → 2026-11-17 08:45 (539)" [ref=e754]'
+                      - generic [ref=e755]: "-$104.61"
+                    - generic [ref=e756]:
+                      - generic [ref=e757]: Fold 3
+                      - generic [ref=e758]:
+                        - 'generic "Train: 2026-11-08 00:00 → 2026-11-15 20:00 (2257)" [ref=e759]'
+                        - 'generic "Validate: 2026-11-15 20:30 → 2026-11-17 08:20 (431)" [ref=e760]'
+                        - 'generic "Test (OOS): 2026-11-17 08:50 → 2026-11-19 05:40 (539)" [ref=e761]'
+                      - generic [ref=e762]: "-$29.04"
+                    - generic [ref=e763]:
+                      - generic [ref=e764]: Fold 4
+                      - generic [ref=e765]:
+                        - 'generic "Train: 2026-11-08 00:00 → 2026-11-17 16:55 (2796)" [ref=e766]'
+                        - 'generic "Validate: 2026-11-17 17:25 → 2026-11-19 05:15 (431)" [ref=e767]'
+                        - 'generic "Test (OOS): 2026-11-19 05:45 → 2026-11-21 02:35 (539)" [ref=e768]'
+                      - generic [ref=e769]: "-$27.51"
+                    - generic [ref=e770]:
+                      - generic [ref=e771]: Fold 5
+                      - generic [ref=e772]:
+                        - 'generic "Train: 2026-11-08 00:00 → 2026-11-19 14:10 (3339)" [ref=e773]'
+                        - 'generic "Validate: 2026-11-19 14:40 → 2026-11-21 02:30 (431)" [ref=e774]'
+                        - 'generic "Test (OOS): 2026-11-21 03:00 → 2026-11-22 23:50 (539)" [ref=e775]'
+                      - generic [ref=e776]: +$51.77
+                - table [ref=e780]:
+                  - rowgroup [ref=e781]:
+                    - row [ref=e782]:
+                      - columnheader "Fold" [ref=e783]
+                      - columnheader "Train range" [ref=e784]
+                      - columnheader "Validation range" [ref=e785]
+                      - columnheader "Test range" [ref=e786]
+                      - columnheader "OOS trades" [ref=e787]
+                      - columnheader "Win rate" [ref=e788]
+                      - columnheader "OOS PF" [ref=e789]
+                      - columnheader "Max DD" [ref=e790]
+                      - columnheader "Net PnL" [ref=e791]
+                  - rowgroup [ref=e792]:
+                    - row [ref=e793]:
+                      - cell "#1" [ref=e794]
+                      - cell "2026-11-08 → 2026-11-12 (1179)" [ref=e795]
+                      - cell "2026-11-12 → 2026-11-13 (431)" [ref=e796]
+                      - cell "2026-11-13 → 2026-11-15 (539)" [ref=e797]
+                      - cell "21" [ref=e798]
+                      - cell "61.9%" [ref=e799]
+                      - cell "1.19" [ref=e800]
+                      - cell "0.3%" [ref=e801]
+                      - cell "+$14.36" [ref=e802]
+                    - row [ref=e803]:
+                      - cell "#2" [ref=e804]
+                      - cell "2026-11-08 → 2026-11-13 (1718)" [ref=e805]
+                      - cell "2026-11-13 → 2026-11-15 (431)" [ref=e806]
+                      - cell "2026-11-15 → 2026-11-17 (539)" [ref=e807]
+                      - cell "24" [ref=e808]
+                      - cell "41.7%" [ref=e809]
+                      - cell "0.22" [ref=e810]
+                      - cell "1.1%" [ref=e811]
+                      - cell "-$104.61" [ref=e812]
+                    - row [ref=e813]:
+                      - cell "#3" [ref=e814]
+                      - cell "2026-11-08 → 2026-11-15 (2257)" [ref=e815]
+                      - cell "2026-11-15 → 2026-11-17 (431)" [ref=e816]
+                      - cell "2026-11-17 → 2026-11-19 (539)" [ref=e817]
+                      - cell "17" [ref=e818]
+                      - cell "47.1%" [ref=e819]
+                      - cell "0.64" [ref=e820]
+                      - cell "0.5%" [ref=e821]
+                      - cell "-$29.04" [ref=e822]
+                    - row [ref=e823]:
+                      - cell "#4" [ref=e824]
+                      - cell "2026-11-08 → 2026-11-17 (2796)" [ref=e825]
+                      - cell "2026-11-17 → 2026-11-19 (431)" [ref=e826]
+                      - cell "2026-11-19 → 2026-11-21 (539)" [ref=e827]
+                      - cell "25" [ref=e828]
+                      - cell "40.0%" [ref=e829]
+                      - cell "0.81" [ref=e830]
+                      - cell "0.9%" [ref=e831]
+                      - cell "-$27.51" [ref=e832]
+                    - row [ref=e833]:
+                      - cell "#5" [ref=e834]
+                      - cell "2026-11-08 → 2026-11-19 (3339)" [ref=e835]
+                      - cell "2026-11-19 → 2026-11-21 (431)" [ref=e836]
+                      - cell "2026-11-21 → 2026-11-22 (539)" [ref=e837]
+                      - cell "17" [ref=e838]
+                      - cell "64.7%" [ref=e839]
+                      - cell "1.91" [ref=e840]
+                      - cell "0.2%" [ref=e841]
+                      - cell "+$51.77" [ref=e842]
+      - region "Run history" [ref=e709]:
+        - generic [ref=e710]:
+          - button "Run history (1)" [expanded] [ref=e843] [cursor=pointer]:
+            - generic [ref=e714]: Run history
+            - generic [ref=e715]: (1)
+          - button "Refresh" [ref=e844] [cursor=pointer]
+        - table [ref=e848]:
+          - rowgroup [ref=e849]:
+            - row [ref=e850]:
+              - columnheader "Strategy" [ref=e851]
+              - columnheader "Kind" [ref=e852]
+              - columnheader "Market" [ref=e853]
+              - columnheader "Range" [ref=e854]
+              - columnheader "Status" [ref=e855]
+              - columnheader "OOS trades" [ref=e856]
+              - columnheader "OOS PF" [ref=e857]
+              - columnheader "Verdict" [ref=e858]
+              - columnheader "Updated" [ref=e859]
+          - rowgroup [ref=e860]:
+            - row [ref=e861] [cursor=pointer]:
+              - cell "1. BTC 5m Scalp" [ref=e862]
+              - cell "Walk-Forward" [ref=e863]
+              - cell "BTC/USDT · 5m" [ref=e864]
+              - cell "2026-11-08 → 2026-11-22" [ref=e865]
+              - cell "completed" [ref=e866]
+              - cell "104" [ref=e868]
+              - cell "0.81" [ref=e869]
+              - cell "Below gate" [ref=e870]
+              - cell "updated 30s ago" [ref=e872]
+  - region "Main navigation":
+    - navigation "Main navigation" [ref=e216]:
+      - button "Dashboard" [ref=e217] [cursor=pointer]
+      - button "Run bot" [ref=e225] [cursor=pointer]
+      - button "Backtest" [ref=e231] [cursor=pointer]
+      - button "Predictions" [ref=e238] [cursor=pointer]
+      - button "Statistics" [ref=e245] [cursor=pointer]
+      - button "More" [ref=e251] [cursor=pointer]

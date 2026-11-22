@@ -2,6 +2,7 @@ import { crossoverSignals } from './signals'
 import type {
   Candle,
   ExitReason,
+  Interval,
   SignalParams,
   Strategy,
   Trade,
@@ -36,6 +37,9 @@ export type BacktestTrade = Trade & {
   exitTime: number
   exitReason: ExitReason
   balanceAfter: number
+  presetId?: string
+  presetName?: string
+  initialStopPrice?: number
 }
 
 export type EquityPoint = {
@@ -62,6 +66,8 @@ export type BacktestResult = {
 export type BacktestSnapshot = {
   version: 1
   createdAt: number
+  label?: string
+  timeframe?: Interval
   config: BacktestConfig
   candles: { from: number; to: number; count: number }
   trades: BacktestTrade[]
@@ -449,10 +455,13 @@ export function runBacktest(
 
 export function createBacktestSnapshot(
   result: BacktestResult,
+  meta?: { label?: string; timeframe?: Interval },
 ): BacktestSnapshot {
   return {
     version: 1,
     createdAt: Date.now(),
+    ...(meta?.label ? { label: meta.label } : {}),
+    ...(meta?.timeframe ? { timeframe: meta.timeframe } : {}),
     config: result.config,
     candles: result.candles,
     trades: result.trades,
@@ -486,7 +495,9 @@ function isBacktestTrade(value: unknown): value is BacktestTrade {
       trade.exitReason === 'target' ||
       trade.exitReason === 'signal' ||
       trade.exitReason === 'end' ||
-      trade.exitReason === 'bankrupt')
+      trade.exitReason === 'bankrupt' ||
+      trade.exitReason === 'manual' ||
+      trade.exitReason === 'kill-switch')
   )
 }
 
@@ -525,4 +536,10 @@ export function isBacktestSnapshot(
     typeof summary.feesPaid === 'number' &&
     typeof summary.bankrupt === 'boolean'
   )
+}
+
+export function isBacktestSnapshotList(
+  value: unknown,
+): value is BacktestSnapshot[] {
+  return Array.isArray(value) && value.every(isBacktestSnapshot)
 }

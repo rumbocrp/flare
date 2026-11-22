@@ -9,6 +9,7 @@ import {
 import {
   ArrowRight,
   BarChart3,
+  BrainCircuit,
   Play,
   RefreshCw,
 } from 'lucide-react'
@@ -270,7 +271,12 @@ function Backtest({ strategy, onNavigate, onSaveResult }: BacktestProps) {
         durationMs: output.durationMs,
         executedIn: output.executedIn,
       })
-      onSaveResult(createBacktestSnapshot(output.result))
+      onSaveResult(
+        createBacktestSnapshot(output.result, {
+          label: `${params.average.toUpperCase()} ${params.fastPeriod}/${params.slowPeriod}${allowShort ? ' · L/S' : ''}`,
+          timeframe: interval,
+        }),
+      )
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') return
       setRunError(
@@ -288,15 +294,26 @@ function Backtest({ strategy, onNavigate, onSaveResult }: BacktestProps) {
       <PageHeader
         title={t('backtest.title')}
         actions={
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => onNavigate('stats')}
-          >
-            <BarChart3 className="size-3.5" />
-            <span>{t('backtest.viewStats')}</span>
-          </Button>
+          <>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => onNavigate('training')}
+            >
+              <BrainCircuit className="size-3.5" />
+              <span>{t('training.openTraining')}</span>
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => onNavigate('stats')}
+            >
+              <BarChart3 className="size-3.5" />
+              <span>{t('backtest.viewStats')}</span>
+            </Button>
+          </>
         }
       />
 
@@ -304,9 +321,6 @@ function Backtest({ strategy, onNavigate, onSaveResult }: BacktestProps) {
         <Card>
           <CardHeader>
             <CardTitle>{t('backtest.data')}</CardTitle>
-            <Badge variant="outline">
-              {pair} · {interval} · {limit}
-            </Badge>
           </CardHeader>
 
           <CardContent className="flex flex-col gap-3">
@@ -325,9 +339,6 @@ function Backtest({ strategy, onNavigate, onSaveResult }: BacktestProps) {
                     ))}
                   </SelectContent>
                 </Select>
-                <span className="text-[11px] text-[var(--text-subtle)]">
-                  {t('backtest.pairHint')}
-                </span>
               </div>
 
               <div className="flex flex-col gap-1.5">
@@ -347,9 +358,6 @@ function Backtest({ strategy, onNavigate, onSaveResult }: BacktestProps) {
                     ))}
                   </SelectContent>
                 </Select>
-                <span className="text-[11px] text-[var(--text-subtle)]">
-                  {t('backtest.timeframeHint')}
-                </span>
               </div>
 
               <div className="flex flex-col gap-1.5">
@@ -369,20 +377,17 @@ function Backtest({ strategy, onNavigate, onSaveResult }: BacktestProps) {
                     ))}
                   </SelectContent>
                 </Select>
-                <span className="text-[11px] text-[var(--text-subtle)]">
-                  {t('backtest.candlesHint')}
-                </span>
               </div>
             </div>
 
             {state.status === 'loading' && (
-              <div className="rounded-sm border border-border bg-secondary/35 px-3 py-2 font-mono text-xs text-muted-foreground" role="status">
+              <div className="rounded-sm bg-muted/35 px-3 py-2 text-xs text-muted-foreground" role="status">
                 {t('backtest.loadingCandles')}
               </div>
             )}
 
             {state.status === 'error' && (
-              <div className="flex flex-wrap items-center justify-between gap-2 rounded-sm border border-[var(--negative)]/40 bg-[var(--negative-soft)] px-3 py-2 text-xs text-[var(--negative)]" role="alert">
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-sm bg-[var(--negative-soft)] px-3 py-2 text-xs text-[var(--negative)]" role="alert">
                 <span>{t('backtest.loadError', { message: state.message })}</span>
                 <Button
                   type="button"
@@ -397,7 +402,7 @@ function Backtest({ strategy, onNavigate, onSaveResult }: BacktestProps) {
             )}
 
             {state.status === 'success' && state.data.length > 0 && (
-              <div className="rounded-sm border border-[var(--border-subtle)] bg-secondary/35 px-3 py-2 font-mono text-[11px] text-muted-foreground tabular-nums">
+              <div className="font-mono text-[11px] text-muted-foreground tabular-nums">
                 {t('backtest.candleRange', {
                   count: state.data.length,
                   from: formatDateTime(state.data[0].time, locale),
@@ -414,9 +419,6 @@ function Backtest({ strategy, onNavigate, onSaveResult }: BacktestProps) {
         <Card>
           <CardHeader>
             <CardTitle>{t('backtest.signal')}</CardTitle>
-            <Badge variant="secondary">
-              {params.average.toUpperCase()} {params.fastPeriod}/{params.slowPeriod}
-            </Badge>
           </CardHeader>
 
           <CardContent className="grid grid-cols-1 gap-3.5 sm:grid-cols-3">
@@ -464,13 +466,13 @@ function Backtest({ strategy, onNavigate, onSaveResult }: BacktestProps) {
 
             <div className="flex flex-col gap-1.5">
               <span
-                className="font-mono text-[10.5px] font-semibold uppercase tracking-[0.07em] text-muted-foreground"
+                className="text-xs font-medium text-muted-foreground"
                 id="bt-average-label"
               >
                 {t('backtest.averageType')}
               </span>
               <div
-                className="inline-flex h-8 w-full items-center gap-0.5 rounded-sm border border-border bg-secondary/65 p-0.5"
+                className="inline-flex h-8 w-full items-center gap-0.5 rounded-sm bg-muted/45 p-0.5"
                 role="group"
                 aria-labelledby="bt-average-label"
               >
@@ -479,10 +481,10 @@ function Backtest({ strategy, onNavigate, onSaveResult }: BacktestProps) {
                     key={option.id}
                     type="button"
                     className={cn(
-                      'inline-flex h-[26px] flex-1 items-center justify-center rounded-[4px] border px-2 font-mono text-xs font-medium transition-all duration-150 cursor-pointer',
+                      'inline-flex h-[26px] flex-1 items-center justify-center rounded-[4px] px-2 font-mono text-xs font-medium transition-all duration-150 cursor-pointer',
                       params.average === option.id
-                        ? 'border-border bg-card font-semibold text-foreground shadow-[0_1px_2px_rgba(0,0,0,0.18)]'
-                        : 'border-transparent text-muted-foreground hover:text-foreground',
+                        ? 'bg-card font-semibold text-foreground'
+                        : 'text-muted-foreground hover:text-foreground',
                     )}
                     aria-pressed={params.average === option.id}
                     onClick={() =>
@@ -600,7 +602,7 @@ function Backtest({ strategy, onNavigate, onSaveResult }: BacktestProps) {
 
             <span
               className={cn(
-                'font-mono text-xs',
+                'text-xs',
                 runError ? 'text-[var(--negative)]' : 'text-muted-foreground',
               )}
               role={runError ? 'alert' : undefined}

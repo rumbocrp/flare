@@ -398,7 +398,7 @@ export function resolveCorsHeaders(req: http.IncomingMessage): CorsResolution {
   const origin = readHeaderString(req, 'origin')
   const baseHeaders: Record<string, string> = {
     Vary: 'Origin',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, POST, PATCH, OPTIONS',
     'Access-Control-Allow-Headers':
       'Content-Type, Authorization, X-API-Key, X-Tenant-Id',
     'Access-Control-Max-Age': '600',

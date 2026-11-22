@@ -1,9 +1,7 @@
 .chart {
   padding: 14px 16px;
-  border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
-  box-shadow: var(--shadow-card);
 }
 
 .chart__readout {
@@ -42,10 +40,10 @@
 }
 
 .chart__grid {
-  stroke: var(--border);
+  stroke: var(--chart-axis);
   stroke-width: 1;
   stroke-dasharray: 3 4;
-  opacity: 0.7;
+  opacity: 0.45;
 }
 
 .chart__baseline {
@@ -81,7 +79,7 @@
 }
 
 .chart__cursor {
-  stroke: var(--border-strong);
+  stroke: var(--chart-axis);
   stroke-width: 1;
 }
 

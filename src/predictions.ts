@@ -226,7 +226,7 @@ export const BITCOIN_20_PREDICTIONS: PredictionRule[] = [
     id: 'm15-sma20-bear-hold',
     number: 5,
     timeframe: '15m',
-    title: 'Algorithmic cap below SMA 20 with RSI < 45 (15m)',
+    title: 'Cap below SMA 20 with RSI < 45 (15m)',
     contractQuestion:
       'With price below the 15m SMA 20 and RSI(14) < 45, will the next 15m candle close below SMA 20?',
     predictedOutcome: 'YES',
@@ -595,6 +595,106 @@ export function evaluatePredictionRule(
     isStatisticallySignificant,
     currentlyActive,
     recentOutcomes: outcomes.slice(-16),
+  }
+}
+
+export type PredictionTriggerEvent = {
+  index: number
+  time: number
+  close: number
+  resolveIndex: number
+  resolveTime: number
+  resolveClose: number
+  changePct: number
+  won: boolean
+  cumulativeWinRatePct: number
+}
+
+export type PredictionDetailedAnalysis = {
+  stats: PredictionBacktestStats
+  events: PredictionTriggerEvent[]
+  ctx: MarketContext
+}
+
+export function evaluatePredictionRuleDetailed(
+  rule: PredictionRule,
+  candles: Candle[],
+): PredictionDetailedAnalysis {
+  const ctx = buildMarketContext(candles)
+  const warmup = 50
+  const maxIndex = candles.length - 1 - rule.horizonBars
+
+  let triggers = 0
+  let hits = 0
+  const outcomes: boolean[] = []
+  const events: PredictionTriggerEvent[] = []
+
+  for (let i = warmup; i <= maxIndex; i++) {
+    if (rule.condition(ctx, i)) {
+      triggers++
+      const hit = rule.resolve(ctx, i)
+      outcomes.push(hit)
+      if (hit) hits++
+
+      const entryCandle = candles[i]
+      const resolveIndex = i + rule.horizonBars
+      const resolveCandle = candles[resolveIndex]
+      const changePct =
+        entryCandle.close > 0
+          ? ((resolveCandle.close - entryCandle.close) / entryCandle.close) * 100
+          : 0
+
+      events.push({
+        index: i,
+        time: entryCandle.time,
+        close: entryCandle.close,
+        resolveIndex,
+        resolveTime: resolveCandle.time,
+        resolveClose: resolveCandle.close,
+        changePct,
+        won: hit,
+        cumulativeWinRatePct: Math.round((hits / triggers) * 1000) / 10,
+      })
+    }
+  }
+
+  const winRatePct =
+    triggers > 0 ? Math.round((hits / triggers) * 1000) / 10 : 0
+  const wilsonLowerBoundPct = computeWilsonLowerBoundPct(hits, triggers)
+  const edgeVs5050Pct = Math.round((winRatePct - 50) * 10) / 10
+  const fairYesPrice = Math.round(winRatePct) / 100
+
+  const conservativeProb = wilsonLowerBoundPct / 100
+  const fullKelly = Math.max(0, 2 * conservativeProb - 1)
+  const quarterKellyPct = Math.round(fullKelly * 0.25 * 1000) / 10
+  const isStatisticallySignificant = triggers >= 5 && wilsonLowerBoundPct > 52
+
+  const lastIdx = candles.length - 1
+  const currentlyActive =
+    lastIdx >= warmup ? rule.condition(ctx, lastIdx) : false
+
+  return {
+    stats: {
+      ruleId: rule.id,
+      number: rule.number,
+      timeframe: rule.timeframe,
+      title: rule.title,
+      contractQuestion: rule.contractQuestion,
+      predictedOutcome: rule.predictedOutcome,
+      horizonBars: rule.horizonBars,
+      triggers,
+      hits,
+      winRatePct,
+      wilsonLowerBoundPct,
+      edgeVs5050Pct,
+      fairYesPrice,
+      quarterKellyPct,
+      isStatisticallySignificant,
+      currentlyActive,
+      recentOutcomes: outcomes.slice(-16),
+    },
+    events,
+    ctx,
   }
 }
 

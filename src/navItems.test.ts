@@ -21,16 +21,19 @@ describe('navigation structure & history', () => {
     expect(primaryNavItems).toHaveLength(5)
     expect(overflowNavItems.map((item) => item.id)).toEqual([
       'bot-config',
+      'training',
       'settings',
     ])
 
     expect(isPrimaryNavPage('dashboard')).toBe(true)
     expect(isPrimaryNavPage('stats')).toBe(true)
     expect(isPrimaryNavPage('bot-config')).toBe(false)
+    expect(isPrimaryNavPage('training')).toBe(false)
     expect(isPrimaryNavPage('settings')).toBe(false)
     expect(isPrimaryNavPage('terminal')).toBe(false)
     expect(getNavLabelKey('terminal')).toBe('nav.terminal')
     expect(getNavLabelKey('bot-config')).toBe('nav.botConfig')
+    expect(getNavLabelKey('training')).toBe('nav.training')
   })
 
   it('records A -> B history without cycles or duplicate adjacent entries', () => {

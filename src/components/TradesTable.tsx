@@ -80,7 +80,7 @@ function TradesTable({ trades }: TradesTableProps) {
             </TableRow>
           )
         })}
-        <TableRow className="bg-secondary/45 font-semibold hover:bg-secondary/45">
+        <TableRow className="bg-muted/35 font-semibold hover:bg-muted/45">
           <TableCell colSpan={6} className="text-right font-mono text-[10.5px] uppercase tracking-wider text-muted-foreground">
             {t('table.total')}
           </TableCell>

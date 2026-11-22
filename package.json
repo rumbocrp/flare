@@ -5,12 +5,13 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "server": "node --experimental-strip-types src/server/index.ts",
+    "server": "node --import ./src/server/tsLoader.mjs --experimental-strip-types src/server/index.ts",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "ml:meta-filter": "node --import ./src/server/tsLoader.mjs --experimental-strip-types scripts/ml-meta-filter.ts"
   },
   "dependencies": {
     "@polymarket/clob-client": "^5.8.1",

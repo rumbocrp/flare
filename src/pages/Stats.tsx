@@ -340,9 +340,9 @@ function Stats({ backtest, strategy, onNavigate }: StatsProps) {
                 <EquityChart points={equityPoints} />
               </CardContent>
 
-              <CardFooter className="grid grid-cols-3 gap-2 border-t border-[var(--border-subtle)] bg-secondary/25 px-3.5 py-2.5">
+              <CardFooter className="grid grid-cols-3 gap-2 bg-muted/25 px-3.5 py-2.5">
                 <div className="flex flex-col gap-0.5">
-                  <span className="font-mono text-[10px] uppercase tracking-[0.06em] text-muted-foreground">
+                  <span className="text-[11px] text-muted-foreground">
                     {t('stats.bestTrade')}
                   </span>
                   <strong
@@ -356,7 +356,7 @@ function Stats({ backtest, strategy, onNavigate }: StatsProps) {
                 </div>
 
                 <div className="flex flex-col gap-0.5">
-                  <span className="font-mono text-[10px] uppercase tracking-[0.06em] text-muted-foreground">
+                  <span className="text-[11px] text-muted-foreground">
                     {t('stats.worstTrade')}
                   </span>
                   <strong
@@ -370,7 +370,7 @@ function Stats({ backtest, strategy, onNavigate }: StatsProps) {
                 </div>
 
                 <div className="flex flex-col gap-0.5">
-                  <span className="font-mono text-[10px] uppercase tracking-[0.06em] text-muted-foreground">
+                  <span className="text-[11px] text-muted-foreground">
                     {t('stats.currentStreak')}
                   </span>
                   <strong
@@ -424,7 +424,7 @@ function Stats({ backtest, strategy, onNavigate }: StatsProps) {
                             : ''}
                         </span>
                       </div>
-                      <div className="relative h-2 w-full overflow-hidden rounded-full bg-secondary">
+                      <div className="relative h-2 w-full overflow-hidden rounded-full bg-muted">
                         <div
                           className={cn('h-full transition-all', meterBarColor)}
                           style={{ width: `${meterWidthPct}%` }}
@@ -445,8 +445,8 @@ function Stats({ backtest, strategy, onNavigate }: StatsProps) {
                     </div>
 
                     <div className="grid grid-cols-2 gap-2">
-                      <div className="flex flex-col gap-0.5 rounded-sm border border-[var(--border-subtle)] bg-secondary/35 px-2.5 py-2">
-                        <span className="font-mono text-[10px] uppercase tracking-[0.05em] text-muted-foreground">
+                      <div className="flex flex-col gap-0.5 rounded-sm bg-muted/30 px-2.5 py-2">
+                        <span className="text-[11px] text-muted-foreground">
                           {t('stats.averageWin')}
                         </span>
                         <strong
@@ -459,8 +459,8 @@ function Stats({ backtest, strategy, onNavigate }: StatsProps) {
                         </strong>
                       </div>
 
-                      <div className="flex flex-col gap-0.5 rounded-sm border border-[var(--border-subtle)] bg-secondary/35 px-2.5 py-2">
-                        <span className="font-mono text-[10px] uppercase tracking-[0.05em] text-muted-foreground">
+                      <div className="flex flex-col gap-0.5 rounded-sm bg-muted/30 px-2.5 py-2">
+                        <span className="text-[11px] text-muted-foreground">
                           {t('stats.averageLoss')}
                         </span>
                         <strong
@@ -473,8 +473,8 @@ function Stats({ backtest, strategy, onNavigate }: StatsProps) {
                         </strong>
                       </div>
 
-                      <div className="flex flex-col gap-0.5 rounded-sm border border-[var(--border-subtle)] bg-secondary/35 px-2.5 py-2">
-                        <span className="font-mono text-[10px] uppercase tracking-[0.05em] text-muted-foreground">
+                      <div className="flex flex-col gap-0.5 rounded-sm bg-muted/30 px-2.5 py-2">
+                        <span className="text-[11px] text-muted-foreground">
                           {t('stats.payoffRealized')}
                         </span>
                         <strong className="font-mono text-xs font-semibold text-foreground tabular-nums">
@@ -484,8 +484,8 @@ function Stats({ backtest, strategy, onNavigate }: StatsProps) {
                         </strong>
                       </div>
 
-                      <div className="flex flex-col gap-0.5 rounded-sm border border-[var(--border-subtle)] bg-secondary/35 px-2.5 py-2">
-                        <span className="font-mono text-[10px] uppercase tracking-[0.05em] text-muted-foreground">
+                      <div className="flex flex-col gap-0.5 rounded-sm bg-muted/30 px-2.5 py-2">
+                        <span className="text-[11px] text-muted-foreground">
                           {t('stats.targetRiskReward')}
                         </span>
                         <strong className="font-mono text-xs font-semibold text-foreground tabular-nums">
@@ -493,8 +493,8 @@ function Stats({ backtest, strategy, onNavigate }: StatsProps) {
                         </strong>
                       </div>
 
-                      <div className="flex flex-col gap-0.5 rounded-sm border border-[var(--border-subtle)] bg-secondary/35 px-2.5 py-2">
-                        <span className="font-mono text-[10px] uppercase tracking-[0.05em] text-muted-foreground">
+                      <div className="flex flex-col gap-0.5 rounded-sm bg-muted/30 px-2.5 py-2">
+                        <span className="text-[11px] text-muted-foreground">
                           {t('stats.longBias')}
                         </span>
                         <strong
@@ -509,8 +509,8 @@ function Stats({ backtest, strategy, onNavigate }: StatsProps) {
                         </strong>
                       </div>
 
-                      <div className="flex flex-col gap-0.5 rounded-sm border border-[var(--border-subtle)] bg-secondary/35 px-2.5 py-2">
-                        <span className="font-mono text-[10px] uppercase tracking-[0.05em] text-muted-foreground">
+                      <div className="flex flex-col gap-0.5 rounded-sm bg-muted/30 px-2.5 py-2">
+                        <span className="text-[11px] text-muted-foreground">
                           {t('stats.shortBias')}
                         </span>
                         <strong
@@ -525,8 +525,8 @@ function Stats({ backtest, strategy, onNavigate }: StatsProps) {
                         </strong>
                       </div>
 
-                      <div className="flex flex-col gap-0.5 rounded-sm border border-[var(--border-subtle)] bg-secondary/35 px-2.5 py-2">
-                        <span className="font-mono text-[10px] uppercase tracking-[0.05em] text-muted-foreground">
+                      <div className="flex flex-col gap-0.5 rounded-sm bg-muted/30 px-2.5 py-2">
+                        <span className="text-[11px] text-muted-foreground">
                           {t('stats.worstLossStreak')}
                         </span>
                         <strong
@@ -548,8 +548,8 @@ function Stats({ backtest, strategy, onNavigate }: StatsProps) {
                         </strong>
                       </div>
 
-                      <div className="flex flex-col gap-0.5 rounded-sm border border-[var(--border-subtle)] bg-secondary/35 px-2.5 py-2">
-                        <span className="font-mono text-[10px] uppercase tracking-[0.05em] text-muted-foreground">
+                      <div className="flex flex-col gap-0.5 rounded-sm bg-muted/30 px-2.5 py-2">
+                        <span className="text-[11px] text-muted-foreground">
                           {t('stats.recoveryFactor')}
                         </span>
                         <strong
@@ -565,7 +565,7 @@ function Stats({ backtest, strategy, onNavigate }: StatsProps) {
                       </div>
                     </div>
 
-                    <div className="mt-auto flex flex-wrap items-center justify-between gap-2 rounded-sm border border-[var(--border-subtle)] bg-secondary/40 px-3 py-2.5">
+                    <div className="mt-auto flex flex-wrap items-center justify-between gap-2 rounded-sm bg-muted/35 px-3 py-2.5">
                       <p className="min-w-0 flex-1 text-[11.5px] leading-snug text-muted-foreground">
                         {insightCopy}
                       </p>
@@ -616,10 +616,10 @@ function Stats({ backtest, strategy, onNavigate }: StatsProps) {
                               setPairFilter(isSelected ? null : row.pair)
                             }
                             className={cn(
-                              'flex flex-col gap-1.5 rounded-sm border p-2.5 text-left transition-all duration-150 cursor-pointer',
+                              'flex flex-col gap-1.5 rounded-sm p-2.5 text-left transition-all duration-150 cursor-pointer',
                               isSelected
-                                ? 'border-primary bg-primary/10'
-                                : 'border-[var(--border-subtle)] bg-secondary/35 hover:border-[var(--border-strong)]',
+                                ? 'bg-primary/14'
+                                : 'bg-muted/30 hover:bg-muted/50',
                             )}
                           >
                             <div className="flex items-center justify-between gap-2 font-mono text-xs tabular-nums">
@@ -648,7 +648,7 @@ function Stats({ backtest, strategy, onNavigate }: StatsProps) {
                                 {formatSignedMoney(row.netPnl)}
                               </span>
                             </div>
-                            <div className="h-1.5 w-full overflow-hidden rounded-full bg-secondary">
+                            <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
                               <div
                                 className={cn(
                                   'h-full',
@@ -694,7 +694,7 @@ function Stats({ backtest, strategy, onNavigate }: StatsProps) {
                           {diag.exits.map((ex) => (
                             <div
                               key={ex.reason}
-                              className="flex flex-col gap-1 rounded-sm border border-[var(--border-subtle)] bg-secondary/35 p-2.5"
+                              className="flex flex-col gap-1 rounded-sm bg-muted/30 p-2.5"
                             >
                               <div className="flex items-center justify-between gap-2 font-mono text-xs tabular-nums">
                                 <span className="font-medium text-foreground">
@@ -716,7 +716,7 @@ function Stats({ backtest, strategy, onNavigate }: StatsProps) {
                                   {formatSignedMoney(ex.netPnl)}
                                 </span>
                               </div>
-                              <div className="h-1.5 w-full overflow-hidden rounded-full bg-secondary">
+                              <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
                                 <div
                                   className={cn(
                                     'h-full',
@@ -737,7 +737,7 @@ function Stats({ backtest, strategy, onNavigate }: StatsProps) {
 
                         {diag.totalFees !== null && (
                           <div className="grid grid-cols-2 gap-2">
-                            <div className="flex flex-col gap-0.5 rounded-sm border border-[var(--border-subtle)] bg-secondary/35 px-2.5 py-2">
+                            <div className="flex flex-col gap-0.5 rounded-sm bg-muted/30 px-2.5 py-2">
                               <span className="font-mono text-[10px] uppercase tracking-[0.05em] text-muted-foreground">
                                 {t('stats.totalFees')}
                               </span>
@@ -745,7 +745,7 @@ function Stats({ backtest, strategy, onNavigate }: StatsProps) {
                                 {formatMoney(-diag.totalFees)}
                               </strong>
                             </div>
-                            <div className="flex flex-col gap-0.5 rounded-sm border border-[var(--border-subtle)] bg-secondary/35 px-2.5 py-2">
+                            <div className="flex flex-col gap-0.5 rounded-sm bg-muted/30 px-2.5 py-2">
                               <span className="font-mono text-[10px] uppercase tracking-[0.05em] text-muted-foreground">
                                 {t('stats.feeDrag', {
                                   pct:
@@ -784,7 +784,7 @@ function Stats({ backtest, strategy, onNavigate }: StatsProps) {
                     variant="outline"
                     size="xs"
                     onClick={() => setPairFilter(null)}
-                    className="gap-1 border-primary/60 text-primary"
+                    className="gap-1 bg-primary/14 text-primary"
                   >
                     <span>{pairFilter}</span>
                     <X className="size-3" />

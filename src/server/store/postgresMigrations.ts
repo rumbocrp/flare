@@ -111,4 +111,176 @@ export const POSTGRES_MIGRATIONS: readonly SqlMigration[] = [
       $$`,
     ],
   },
+  {
+    version: 3,
+    name: 'prediction_engine_windows_snapshots_trades',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS prediction_windows (
+        slug TEXT PRIMARY KEY,
+        timeframe TEXT NOT NULL,
+        condition_id TEXT,
+        up_token_id TEXT,
+        down_token_id TEXT,
+        resolution_source TEXT NOT NULL,
+        start_time_ms BIGINT NOT NULL,
+        end_time_ms BIGINT NOT NULL,
+        open_twap DOUBLE PRECISION,
+        close_twap DOUBLE PRECISION,
+        resolved_up BOOLEAN,
+        tick_size DOUBLE PRECISION,
+        neg_risk BOOLEAN NOT NULL DEFAULT FALSE,
+        volume_usd DOUBLE PRECISION,
+        updated_at BIGINT NOT NULL
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_pred_windows_tf_start
+        ON prediction_windows (timeframe, start_time_ms DESC)`,
+      `CREATE INDEX IF NOT EXISTS idx_pred_windows_resolved_end
+        ON prediction_windows (resolved_up, end_time_ms DESC)`,
+      `CREATE TABLE IF NOT EXISTS prediction_window_snapshots (
+        id BIGSERIAL PRIMARY KEY,
+        slug TEXT NOT NULL,
+        captured_at_ms BIGINT NOT NULL,
+        seconds_remaining DOUBLE PRECISION NOT NULL,
+        twap_price DOUBLE PRECISION,
+        binance_price DOUBLE PRECISION,
+        sigma_1m DOUBLE PRECISION,
+        basis_bps DOUBLE PRECISION,
+        yes_bid DOUBLE PRECISION,
+        yes_ask DOUBLE PRECISION,
+        yes_depth_usd DOUBLE PRECISION,
+        no_bid DOUBLE PRECISION,
+        no_ask DOUBLE PRECISION,
+        no_depth_usd DOUBLE PRECISION,
+        p_model_yes DOUBLE PRECISION,
+        UNIQUE(slug, captured_at_ms)
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_pred_snapshots_slug_time
+        ON prediction_window_snapshots (slug, captured_at_ms ASC)`,
+      `CREATE INDEX IF NOT EXISTS idx_pred_snapshots_captured_at
+        ON prediction_window_snapshots (captured_at_ms DESC)`,
+      `CREATE TABLE IF NOT EXISTS prediction_shadow_trades (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        strategy_id TEXT NOT NULL,
+        lane TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        slug TEXT NOT NULL,
+        timeframe TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        liquidity_role TEXT NOT NULL,
+        entry_time_ms BIGINT NOT NULL,
+        entry_price DOUBLE PRECISION NOT NULL,
+        fee_usd DOUBLE PRECISION NOT NULL,
+        stake_usd DOUBLE PRECISION NOT NULL,
+        shares DOUBLE PRECISION NOT NULL,
+        p_model DOUBLE PRECISION NOT NULL,
+        p_calibrated DOUBLE PRECISION NOT NULL,
+        markout_30s DOUBLE PRECISION,
+        resolved_up BOOLEAN,
+        won BOOLEAN,
+        net_pnl_usd DOUBLE PRECISION,
+        venue_order_id TEXT,
+        status TEXT NOT NULL
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_pred_trades_tenant_entry
+        ON prediction_shadow_trades (tenant_id, entry_time_ms DESC)`,
+      `CREATE INDEX IF NOT EXISTS idx_pred_trades_tenant_strategy_status
+        ON prediction_shadow_trades (tenant_id, strategy_id, status, entry_time_ms DESC)`,
+      `CREATE INDEX IF NOT EXISTS idx_pred_trades_slug
+        ON prediction_shadow_trades (slug)`,
+      `CREATE TABLE IF NOT EXISTS prediction_strategy_states (
+        tenant_id TEXT NOT NULL,
+        strategy_id TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        halted_reason TEXT,
+        updated_at BIGINT NOT NULL,
+        PRIMARY KEY (tenant_id, strategy_id)
+      )`,
+    ],
+  },
+  {
+    version: 4,
+    name: 'runtime_events_strategy_audits_and_order_fills',
+    statements: [
+      `ALTER TABLE orders ADD COLUMN IF NOT EXISTS filled_qty DOUBLE PRECISION`,
+      `ALTER TABLE orders ADD COLUMN IF NOT EXISTS avg_price DOUBLE PRECISION`,
+      `ALTER TABLE orders ADD COLUMN IF NOT EXISTS fee DOUBLE PRECISION`,
+      `ALTER TABLE orders ADD COLUMN IF NOT EXISTS fee_asset TEXT`,
+      `ALTER TABLE orders ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ`,
+      `CREATE TABLE IF NOT EXISTS runtime_events (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        timestamp TIMESTAMPTZ NOT NULL,
+        type TEXT NOT NULL,
+        severity TEXT NOT NULL,
+        message TEXT NOT NULL,
+        payload_json JSONB,
+        source TEXT NOT NULL,
+        correlation_id TEXT
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_runtime_events_tenant_ts
+        ON runtime_events (tenant_id, timestamp DESC, id DESC)`,
+      `CREATE INDEX IF NOT EXISTS idx_runtime_events_tenant_type_ts
+        ON runtime_events (tenant_id, type, timestamp DESC)`,
+      `CREATE TABLE IF NOT EXISTS strategy_audits (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL,
+        preset_id TEXT NOT NULL,
+        preset_name TEXT NOT NULL,
+        domain TEXT NOT NULL,
+        pair TEXT NOT NULL,
+        timeframe TEXT NOT NULL,
+        from_time_ms BIGINT NOT NULL,
+        to_time_ms BIGINT NOT NULL,
+        candles INTEGER NOT NULL,
+        metrics_json JSONB NOT NULL,
+        assumptions_json JSONB NOT NULL,
+        data_source TEXT NOT NULL
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_strategy_audits_tenant_created
+        ON strategy_audits (tenant_id, created_at DESC)`,
+    ],
+  },
+  {
+    version: 5,
+    name: 'training_runs_and_order_preset_attribution',
+    statements: [
+      `ALTER TABLE orders ADD COLUMN IF NOT EXISTS preset_id TEXT`,
+      `CREATE INDEX IF NOT EXISTS idx_orders_tenant_preset_ts
+        ON orders (tenant_id, preset_id, timestamp DESC)`,
+      `CREATE TABLE IF NOT EXISTS training_runs (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        client_run_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        preset_id TEXT NOT NULL,
+        strategy_family TEXT NOT NULL,
+        pair TEXT NOT NULL,
+        timeframe TEXT NOT NULL,
+        from_time_ms BIGINT NOT NULL,
+        to_time_ms BIGINT NOT NULL,
+        candle_count INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        config_json JSONB NOT NULL,
+        progress_json JSONB,
+        metrics_json JSONB,
+        folds_json JSONB,
+        equity_json JSONB,
+        trades_json JSONB,
+        assumptions_json JSONB NOT NULL,
+        data_source TEXT NOT NULL,
+        error TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        completed_at TIMESTAMPTZ
+      )`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_training_runs_client
+        ON training_runs (tenant_id, client_run_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_training_runs_tenant_created
+        ON training_runs (tenant_id, created_at DESC)`,
+      `CREATE INDEX IF NOT EXISTS idx_training_runs_preset_created
+        ON training_runs (tenant_id, preset_id, created_at DESC)`,
+    ],
+  },
 ]

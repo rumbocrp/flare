@@ -48,7 +48,7 @@ function AlertDialogContent({
       <AlertDialogPrimitive.Content
         data-slot="alert-dialog-content"
         className={cn(
-          'fixed top-1/2 left-1/2 z-50 grid w-[calc(100%-2rem)] max-w-md -translate-x-1/2 -translate-y-1/2 gap-4 rounded-lg border border-[var(--border-strong)] bg-card/95 p-5 text-card-foreground shadow-[var(--shadow-soft)] backdrop-blur-xl outline-none',
+          'fixed top-1/2 left-1/2 z-50 grid w-[calc(100%-2rem)] max-w-md -translate-x-1/2 -translate-y-1/2 gap-4 rounded-lg bg-card p-5 text-card-foreground outline-none',
           className,
         )}
         {...props}

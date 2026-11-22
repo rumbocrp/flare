@@ -1,16 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   getBotStatus,
-  submitDemoOrderOnServer,
+  submitExchangeOrderOnServer,
   subscribeToBotStream,
   type BotServerSnapshot,
 } from '../api/botClient'
 import CandleChart from './CandleChart'
+import ChartAlertsPopover from './ChartAlertsPopover'
 import MacdPanel from './MacdPanel'
+import PaneResizeHandle from './PaneResizeHandle'
 import RsiPanel from './RsiPanel'
-import SignalsTable from './SignalsTable'
 import StudioSidebar from './StudioSidebar'
+import type { CoinFocusMeta, LiveMarketMetrics } from './MarketSection'
 import {
+  Bell,
+  Bot,
+  Check,
   Crosshair,
   Layers,
   Magnet,
@@ -18,14 +23,27 @@ import {
   Minimize2,
   Minus,
   PanelRight,
+  Plus,
+  Redo2,
   RotateCcw,
   Ruler,
   SlidersHorizontal,
+  Target,
   Trash2,
   TrendingUp,
   Undo2,
-  Zap,
+  X,
 } from 'lucide-react'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -43,7 +61,6 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Separator } from '@/components/ui/separator'
-import { Slider } from '@/components/ui/slider'
 import {
   Tooltip,
   TooltipContent,
@@ -51,41 +68,106 @@ import {
 } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 import type { StrategyPreset } from '../botEngine'
-import { formatPrice } from '../format'
+import { playAlertChime } from '../botProfiles'
 import {
-  atr,
-  bollingerBands,
-  ema,
-  macd,
-  rsi,
-  sma,
-  toHeikinAshi,
-  vwap,
-} from '../indicators'
-import type { LiveStreamStatus } from '../market/liveStream'
-import { RSI_PERIOD, crossoverSignals } from '../signals'
-import { availablePairs } from '../strategy'
+  createChartAlert,
+  evaluateAlerts,
+  loadChartAlerts,
+  rearmAlert,
+  removeAlert,
+  saveChartAlerts,
+  toggleAlertEnabled,
+} from '../chartAlerts'
+import {
+  createCrosshairChannel,
+  createPanTransformChannel,
+} from '../chartCrosshair'
+import {
+  createDrawingHistory,
+  drawingScopeKey,
+  loadDrawingsStore,
+  pushDrawingHistory,
+  redoDrawingHistory,
+  saveDrawingsStore,
+  undoDrawingHistory,
+  type DrawingHistoryState,
+  type DrawingsByScope,
+} from '../chartDrawings'
+import {
+  COLLAPSED_PANE_HEIGHT,
+  DEFAULT_MACD_SETTINGS,
+  DEFAULT_PANE_HEIGHT,
+  DEFAULT_RSI_SETTINGS,
+  MIN_PANE_HEIGHT,
+  clampPaneHeight,
+  createDefaultPanes,
+  isChartPaneList,
+  normalizeChartPanes,
+  resolvePaneSvgHeight,
+  sanitizeMacdSettings,
+  sanitizeRsiSettings,
+} from '../chartPanes'
+import {
+  appendHeikinAshiTail,
+  appendLiveAnalysisTail,
+  buildAnalysisPrefix,
+  buildHeikinAshiPrefix,
+} from '../chartRenderer'
+import {
+  DEFAULT_VISIBLE_COUNT,
+  ZOOM_PRESETS,
+  applyZoomPreset,
+  compute24hChangePct,
+  createDefaultViewport,
+  jumpViewportToIndex,
+  jumpViewportToLive,
+  panViewport,
+  resolveViewportRange,
+  zoomViewport,
+} from '../chartViewport'
+import { formatPrice } from '../format'
+import { useElementSize } from '../hooks/useElementWidth'
 import { useLocalStorageState } from '../hooks/useLocalStorageState'
+import { macd as computeMacd, rsi as computeRsi } from '../indicators'
+import type { LiveStreamStatus } from '../market/liveStream'
+import { RSI_PERIOD } from '../signals'
+import { availablePairs } from '../strategy'
 import { useI18n } from '../i18n'
 import type {
   Candle,
   CandleStyleMode,
+  ChartAlert,
+  ChartAlertDirection,
   ChartDrawing,
   ChartOrderLine,
   ChartOverlay,
+  ChartPaneConfig,
+  ChartPaneKind,
+  ChartViewport,
+  DensitySetting,
   DrawingToolMode,
   Interval,
+  MacdPaneSettings,
+  OrderPrefillIntent,
   PageId,
+  RsiPaneSettings,
   SignalParams,
   Strategy,
+  TradeSide,
 } from '../types'
 
-const DRAWINGS_STORAGE_KEY = 'lixtrd:chart-drawings-by-pair'
+const STUDIO_PREFS_KEY = 'flare:chart-studio-prefs'
+const VIEWPORT_ZOOM_STORAGE_KEY = 'flare:chart-viewport-v1'
 
-type DrawingsByPair = Record<string, ChartDrawing[]>
+type ViewportZoomByScope = Record<string, number>
 
-function isDrawingsByPair(value: unknown): value is DrawingsByPair {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
+function isViewportZoomByScope(value: unknown): value is ViewportZoomByScope {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return false
+  }
+  return Object.values(value as Record<string, unknown>).every(
+    (entry) => typeof entry === 'number' && Number.isFinite(entry) && entry >= 10,
+  )
 }
 
 type StudioPrefs = {
@@ -102,6 +184,7 @@ type StudioPrefs = {
   showRsi: boolean
   showMacd: boolean
   showRightPanel: boolean
+  panes?: ChartPaneConfig[]
 }
 
 const DEFAULT_STUDIO_PREFS: StudioPrefs = {
@@ -116,8 +199,9 @@ const DEFAULT_STUDIO_PREFS: StudioPrefs = {
   showSignals: true,
   showOrderLines: true,
   showRsi: true,
-  showMacd: true,
+  showMacd: false,
   showRightPanel: true,
+  panes: createDefaultPanes(true, false),
 }
 
 const VALID_CANDLE_STYLES: CandleStyleMode[] = [
@@ -125,6 +209,8 @@ const VALID_CANDLE_STYLES: CandleStyleMode[] = [
   'hollow',
   'heikin-ashi',
 ]
+
+const INTERVAL_OPTIONS: readonly Interval[] = ['5m', '15m', '1h', '4h', '1d']
 
 function isStudioPrefs(value: unknown): value is StudioPrefs {
   if (typeof value !== 'object' || value === null) return false
@@ -143,8 +229,14 @@ function isStudioPrefs(value: unknown): value is StudioPrefs {
     typeof c.showOrderLines === 'boolean' &&
     typeof c.showRsi === 'boolean' &&
     typeof c.showMacd === 'boolean' &&
-    typeof c.showRightPanel === 'boolean'
+    typeof c.showRightPanel === 'boolean' &&
+    (c.panes === undefined || isChartPaneList(c.panes))
   )
+}
+
+function formatUtcClock(timestamp: number | null | undefined): string {
+  if (!timestamp) return '--:--:--'
+  return new Date(timestamp).toISOString().slice(11, 19)
 }
 
 type MarketAnalysisProps = {
@@ -160,56 +252,121 @@ type MarketAnalysisProps = {
   onNavigate?: (page: PageId) => void
   streamStatus?: LiveStreamStatus
   lastTickAt?: number | null
+  coinProfile?: CoinFocusMeta
+  liveMetrics?: LiveMarketMetrics | null
+  onCalibratePreset?: () => void
   chartHeight?: number
   defaultWheelZoomLocked?: boolean
   compact?: boolean
+  soundAlerts?: boolean
+  density?: DensitySetting
+  reducedMotion?: boolean
 }
-
-const ZOOM_PRESETS = [35, 75, 140, 240, 310] as const
 
 function MarketAnalysis({
   candles,
   params,
   pair = 'BTC/USDT',
-  timeframe = '1h',
+  timeframe = '15m',
   onSelectPair,
   onSelectTimeframe,
   onChangeParams,
   strategy,
   onSaveStrategy,
+  onNavigate,
   streamStatus,
-  chartHeight = 320,
+  lastTickAt,
+  coinProfile,
+  liveMetrics,
+  onCalibratePreset,
   defaultWheelZoomLocked = false,
-  compact = false,
+  soundAlerts = false,
+  density = 'comfortable',
+  reducedMotion = false,
 }: MarketAnalysisProps) {
   const { t, language } = useI18n()
   const isEs = language === 'es'
+  const isCompactDensity = density === 'compact'
 
   // Reserve the first 50 bars of the 360-candle spectrum as warm-up buffer
   // so SMA, EMA, EMA-50, and RSI-14 never start cut off or null on the left edge.
   const warmupBars = useMemo(
-    () => (candles.length > 90 ? 50 : Math.min(20, Math.floor(candles.length / 4))),
+    () =>
+      candles.length > 90 ? 50 : Math.min(20, Math.floor(candles.length / 4)),
     [candles.length],
   )
   const navigableTotal = Math.max(20, candles.length - warmupBars)
 
   const [prefs, setPrefs] = useLocalStorageState<StudioPrefs>(
-    'flare:chart-studio-prefs',
+    STUDIO_PREFS_KEY,
     DEFAULT_STUDIO_PREFS,
     isStudioPrefs,
   )
+  const [persistedZoomByScope, setPersistedZoomByScope] =
+    useLocalStorageState<ViewportZoomByScope>(
+      VIEWPORT_ZOOM_STORAGE_KEY,
+      {},
+      isViewportZoomByScope,
+    )
+  const viewportScopeKey = `${pair}|${timeframe}`
+  const defaultScopeZoom =
+    persistedZoomByScope[viewportScopeKey] ?? DEFAULT_VISIBLE_COUNT
+  const [scopedViewport, setScopedViewport] = useState<{
+    scopeKey: string
+    viewport: ChartViewport
+  }>(() => ({
+    scopeKey: viewportScopeKey,
+    viewport: createDefaultViewport(defaultScopeZoom),
+  }))
+  const activeViewport: ChartViewport =
+    scopedViewport.scopeKey === viewportScopeKey
+      ? scopedViewport.viewport
+      : createDefaultViewport(defaultScopeZoom)
+
+  const commitViewport = useCallback(
+    (next: ChartViewport, persistZoom = false) => {
+      setScopedViewport({ scopeKey: viewportScopeKey, viewport: next })
+      if (persistZoom) {
+        setPersistedZoomByScope((prev) =>
+          prev[viewportScopeKey] === next.visibleCount
+            ? prev
+            : { ...prev, [viewportScopeKey]: next.visibleCount },
+        )
+      }
+    },
+    [setPersistedZoomByScope, viewportScopeKey],
+  )
+
   const [isExpanded, setIsExpanded] = useState(false)
-  const [zoomCount, setZoomCount] = useState<number>(110)
-  const [panOffset, setPanOffset] = useState<number>(0)
   const [drawingMode, setDrawingMode] = useState<DrawingToolMode>('cursor')
   const [orderSide, setOrderSide] = useState<'buy' | 'sell'>('buy')
   const [orderSizeUsd, setOrderSizeUsd] = useState<number>(250)
-  const [hoverIndex, setHoverIndex] = useState<number | null>(null)
+  // Crosshair & sub-pixel pan pub/sub channels shared by CandleChart, RsiPanel,
+  // and MacdPanel so hovering and sub-pixel panning never trigger MarketAnalysis re-renders.
+  const crosshairChannel = useMemo(() => createCrosshairChannel(), [])
+  const panTransformChannel = useMemo(() => createPanTransformChannel(), [])
+
+  useEffect(() => {
+    crosshairChannel.set(null)
+    panTransformChannel.set(0)
+  }, [crosshairChannel, panTransformChannel, viewportScopeKey])
   const [botSnapshot, setBotSnapshot] = useState<BotServerSnapshot | null>(null)
   const [orderFeedback, setOrderFeedback] = useState<string | null>(null)
   const [submittingOrder, setSubmittingOrder] = useState(false)
-  const [expandedStackHeight, setExpandedStackHeight] = useState<number>(560)
-  const expandedStackRef = useRef<HTMLDivElement | null>(null)
+  const [narrowPanelOpen, setNarrowPanelOpen] = useState(false)
+  const [isWideViewport, setIsWideViewport] = useState<boolean>(() =>
+    typeof window !== 'undefined'
+      ? window.matchMedia('(min-width: 1024px)').matches
+      : true,
+  )
+  const [plotStackRef, plotStackSize] = useElementSize<HTMLDivElement>()
+
+  const panes = useMemo(
+    () => normalizeChartPanes(prefs.panes, prefs.showRsi, prefs.showMacd),
+    [prefs.panes, prefs.showMacd, prefs.showRsi],
+  )
+  const rsiPane = panes[0]
+  const macdPane = panes[1]
 
   const showFastSlow = prefs.showFastSlow
   const showEma50 = prefs.showEma50
@@ -219,9 +376,9 @@ function MarketAnalysis({
   const showVolumeSma = prefs.showVolumeSma
   const showSignals = prefs.showSignals
   const showOrderLines = prefs.showOrderLines
-  const showRsi = prefs.showRsi
-  const showMacd = prefs.showMacd
-  const showRightPanel = prefs.showRightPanel
+  const showRsi = rsiPane.visible
+  const showMacd = macdPane.visible
+  const showRightPanel = isWideViewport ? prefs.showRightPanel : narrowPanelOpen
   const candleStyle = prefs.candleStyle
   const magnetSnap = prefs.magnetSnap
 
@@ -232,6 +389,129 @@ function MarketAnalysis({
     [setPrefs],
   )
 
+  const updatePanes = useCallback(
+    (updater: (current: ChartPaneConfig[]) => ChartPaneConfig[]) => {
+      setPrefs((prev) => {
+        const current = normalizeChartPanes(
+          prev.panes,
+          prev.showRsi,
+          prev.showMacd,
+        )
+        const nextPanes = updater(current)
+        const nextRsi = nextPanes.find((p) => p.kind === 'rsi')
+        const nextMacd = nextPanes.find((p) => p.kind === 'macd')
+        return {
+          ...prev,
+          panes: nextPanes,
+          showRsi: nextRsi ? nextRsi.visible : prev.showRsi,
+          showMacd: nextMacd ? nextMacd.visible : prev.showMacd,
+        }
+      })
+    },
+    [setPrefs],
+  )
+
+  const handleSetPaneVisible = useCallback(
+    (kind: ChartPaneKind, visible: boolean) => {
+      updatePanes((list) =>
+        list.map((pane) =>
+          pane.kind === kind
+            ? { ...pane, visible, collapsed: visible ? false : pane.collapsed }
+            : pane,
+        ),
+      )
+    },
+    [updatePanes],
+  )
+
+  const handleTogglePaneCollapse = useCallback(
+    (kind: ChartPaneKind) => {
+      updatePanes((list) =>
+        list.map((pane) =>
+          pane.kind === kind ? { ...pane, collapsed: !pane.collapsed } : pane,
+        ),
+      )
+    },
+    [updatePanes],
+  )
+
+  const handleResizePane = useCallback(
+    (kind: ChartPaneKind, requestedHeight: number) => {
+      updatePanes((list) => {
+        const visibleList = list.filter((p) => p.visible)
+        const otherHeight = visibleList
+          .filter((p) => p.kind !== kind)
+          .reduce(
+            (sum, p) => sum + (p.collapsed ? COLLAPSED_PANE_HEIGHT : p.height),
+            0,
+          )
+        const clamped = clampPaneHeight(
+          requestedHeight,
+          plotStackSize.height,
+          otherHeight,
+          visibleList.length,
+        )
+        return list.map((pane) =>
+          pane.kind === kind
+            ? { ...pane, height: clamped, collapsed: false }
+            : pane,
+        )
+      })
+    },
+    [plotStackSize.height, updatePanes],
+  )
+
+  const handleResetPaneHeight = useCallback(
+    (kind: ChartPaneKind) => {
+      handleResizePane(kind, DEFAULT_PANE_HEIGHT)
+    },
+    [handleResizePane],
+  )
+
+  const handleUpdateRsiSettings = useCallback(
+    (patch: Partial<RsiPaneSettings>) => {
+      updatePanes((list) =>
+        list.map((pane) =>
+          pane.kind === 'rsi'
+            ? { ...pane, settings: sanitizeRsiSettings(patch, pane.settings) }
+            : pane,
+        ),
+      )
+    },
+    [updatePanes],
+  )
+
+  const handleUpdateMacdSettings = useCallback(
+    (patch: Partial<MacdPaneSettings>) => {
+      updatePanes((list) =>
+        list.map((pane) =>
+          pane.kind === 'macd'
+            ? { ...pane, settings: sanitizeMacdSettings(patch, pane.settings) }
+            : pane,
+        ),
+      )
+    },
+    [updatePanes],
+  )
+
+  const handleToggleRightPanel = useCallback(() => {
+    if (isWideViewport) {
+      updatePref('showRightPanel', !prefs.showRightPanel)
+    } else {
+      setNarrowPanelOpen((prev) => !prev)
+    }
+  }, [isWideViewport, prefs.showRightPanel, updatePref])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined
+    const mq = window.matchMedia('(min-width: 1024px)')
+    const onChange = (event: MediaQueryListEvent) => {
+      setIsWideViewport(event.matches)
+    }
+    mq.addEventListener('change', onChange)
+    return () => mq.removeEventListener('change', onChange)
+  }, [])
+
   useEffect(() => {
     if (!isExpanded) return undefined
     const prevOverflow = document.body.style.overflow
@@ -241,19 +521,141 @@ function MarketAnalysis({
     }
   }, [isExpanded])
 
+  const [drawingsState, setDrawingsState] = useState<{
+    store: DrawingsByScope
+    history: Record<string, DrawingHistoryState>
+  }>(() => ({
+    store: loadDrawingsStore(timeframe),
+    history: {},
+  }))
+  const [scopedSelectedDrawing, setScopedSelectedDrawing] = useState<{
+    scopeKey: string
+    id: string
+  } | null>(null)
+  const [clearDialogOpen, setClearDialogOpen] = useState(false)
+
+  const currentDrawingScope = drawingScopeKey(pair, timeframe)
+  const selectedDrawingId =
+    scopedSelectedDrawing &&
+      scopedSelectedDrawing.scopeKey === currentDrawingScope
+      ? scopedSelectedDrawing.id
+      : null
+  const setSelectedDrawingId = useCallback(
+    (id: string | null) => {
+      setScopedSelectedDrawing(
+        id === null ? null : { scopeKey: currentDrawingScope, id },
+      )
+    },
+    [currentDrawingScope],
+  )
+
+  const handleSelectDrawingMode = useCallback(
+    (mode: DrawingToolMode) => {
+      setDrawingMode(mode)
+      if (mode !== 'cursor') {
+        setSelectedDrawingId(null)
+      }
+    },
+    [setSelectedDrawingId],
+  )
+
+  useEffect(() => {
+    saveDrawingsStore(drawingsState.store)
+  }, [drawingsState.store])
+
+  const currentHistory: DrawingHistoryState = useMemo(
+    () =>
+      drawingsState.history[currentDrawingScope] ??
+      createDrawingHistory(drawingsState.store[currentDrawingScope] ?? []),
+    [currentDrawingScope, drawingsState.history, drawingsState.store],
+  )
+  const scopedDrawings = currentHistory.present
+  const canUndoDrawings = currentHistory.past.length > 0
+  const canRedoDrawings = currentHistory.future.length > 0
+
+  const commitDrawingList = useCallback(
+    (updater: (current: ChartDrawing[]) => ChartDrawing[]) => {
+      setDrawingsState((prev) => {
+        const base =
+          prev.history[currentDrawingScope] ??
+          createDrawingHistory(prev.store[currentDrawingScope] ?? [])
+        const nextList = updater(base.present)
+        const nextHistory = pushDrawingHistory(base, nextList)
+        return {
+          store: { ...prev.store, [currentDrawingScope]: nextList },
+          history: { ...prev.history, [currentDrawingScope]: nextHistory },
+        }
+      })
+    },
+    [currentDrawingScope],
+  )
+
+  const handleAddDrawing = useCallback(
+    (drawing: ChartDrawing) => {
+      commitDrawingList((list) => [...list, drawing])
+    },
+    [commitDrawingList],
+  )
+
+  const handleUpdateDrawing = useCallback(
+    (updated: ChartDrawing) => {
+      commitDrawingList((list) =>
+        list.map((d) => (d.id === updated.id ? updated : d)),
+      )
+    },
+    [commitDrawingList],
+  )
+
+  const handleRemoveDrawing = useCallback(
+    (id: string) => {
+      commitDrawingList((list) => list.filter((d) => d.id !== id))
+      setScopedSelectedDrawing((prev) => (prev && prev.id === id ? null : prev))
+    },
+    [commitDrawingList],
+  )
+
+  const handleUndoDrawing = useCallback(() => {
+    setDrawingsState((prev) => {
+      const base = prev.history[currentDrawingScope]
+      if (!base || base.past.length === 0) return prev
+      const nextHistory = undoDrawingHistory(base)
+      return {
+        store: { ...prev.store, [currentDrawingScope]: nextHistory.present },
+        history: { ...prev.history, [currentDrawingScope]: nextHistory },
+      }
+    })
+  }, [currentDrawingScope])
+
+  const handleRedoDrawing = useCallback(() => {
+    setDrawingsState((prev) => {
+      const base = prev.history[currentDrawingScope]
+      if (!base || base.future.length === 0) return prev
+      const nextHistory = redoDrawingHistory(base)
+      return {
+        store: { ...prev.store, [currentDrawingScope]: nextHistory.present },
+        history: { ...prev.history, [currentDrawingScope]: nextHistory },
+      }
+    })
+  }, [currentDrawingScope])
+
+  const handleConfirmClearDrawings = useCallback(() => {
+    commitDrawingList(() => [])
+    setScopedSelectedDrawing(null)
+    setClearDialogOpen(false)
+  }, [commitDrawingList])
+
   useEffect(() => {
     let popupOpenAtKeyDown = false
     const onKeyDownCapture = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         popupOpenAtKeyDown = Boolean(
           document.querySelector(
-            '[data-slot="popover-content"], [data-slot="select-content"], [data-radix-popper-content-wrapper], [role="listbox"]',
+            '[data-slot="popover-content"], [data-slot="select-content"], [data-radix-popper-content-wrapper], [role="listbox"], [role="alertdialog"]',
           ),
         )
       }
     }
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.ctrlKey || e.metaKey || e.altKey) return
       const target = e.target as HTMLElement | null
       const tag = target?.tagName
       if (
@@ -264,6 +666,32 @@ function MarketAnalysis({
       ) {
         return
       }
+      if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+        if (e.key.toLowerCase() === 'z' && !e.shiftKey) {
+          if (canUndoDrawings) {
+            e.preventDefault()
+            handleUndoDrawing()
+          }
+          return
+        }
+        if (
+          (e.key.toLowerCase() === 'z' && e.shiftKey) ||
+          e.key.toLowerCase() === 'y'
+        ) {
+          if (canRedoDrawings) {
+            e.preventDefault()
+            handleRedoDrawing()
+          }
+          return
+        }
+        return
+      }
+      if (e.altKey) return
+      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedDrawingId) {
+        e.preventDefault()
+        handleRemoveDrawing(selectedDrawingId)
+        return
+      }
       if (e.key === 'f' || e.key === 'F') {
         e.preventDefault()
         setIsExpanded((v) => !v)
@@ -272,9 +700,19 @@ function MarketAnalysis({
           popupOpenAtKeyDown = false
           return
         }
+        if (selectedDrawingId) {
+          e.preventDefault()
+          setSelectedDrawingId(null)
+          return
+        }
         if (drawingMode !== 'cursor') {
           e.preventDefault()
           setDrawingMode('cursor')
+          return
+        }
+        if (!isWideViewport && narrowPanelOpen) {
+          e.preventDefault()
+          setNarrowPanelOpen(false)
           return
         }
         if (isExpanded) {
@@ -289,27 +727,19 @@ function MarketAnalysis({
       window.removeEventListener('keydown', onKeyDownCapture, true)
       window.removeEventListener('keydown', onKeyDown)
     }
-  }, [isExpanded, drawingMode])
-
-  useEffect(() => {
-    if (!isExpanded) return undefined
-    const el = expandedStackRef.current
-    if (!el) return undefined
-    const updateHeight = () => {
-      setExpandedStackHeight(Math.max(320, Math.floor(el.clientHeight)))
-    }
-    updateHeight()
-    const observer = new ResizeObserver(() => updateHeight())
-    observer.observe(el)
-    return () => observer.disconnect()
-  }, [isExpanded])
-
-  const [drawingsByPair, setDrawingsByPair] =
-    useLocalStorageState<DrawingsByPair>(
-      DRAWINGS_STORAGE_KEY,
-      {},
-      isDrawingsByPair,
-    )
+  }, [
+    canRedoDrawings,
+    canUndoDrawings,
+    drawingMode,
+    handleRedoDrawing,
+    handleRemoveDrawing,
+    handleUndoDrawing,
+    isExpanded,
+    isWideViewport,
+    narrowPanelOpen,
+    selectedDrawingId,
+    setSelectedDrawingId,
+  ])
 
   useEffect(() => {
     let active = true
@@ -317,7 +747,7 @@ function MarketAnalysis({
       .then((snap) => {
         if (active) setBotSnapshot(snap)
       })
-      .catch(() => {})
+      .catch(() => { })
     const unsubscribe = subscribeToBotStream((snap) => {
       if (active) setBotSnapshot(snap)
     })
@@ -327,127 +757,138 @@ function MarketAnalysis({
     }
   }, [])
 
-  // Clamp zoom and pan whenever candle spectrum updates
-  const clampedZoom = Math.min(Math.max(25, zoomCount), navigableTotal)
-  const maxPanOffset = Math.max(0, navigableTotal - clampedZoom)
-  const clampedPan = Math.min(Math.max(0, panOffset), maxPanOffset)
+  // Resolve absolute timestamp-anchored viewport (immune to live candle drift)
+  const resolvedViewport = useMemo(
+    () => resolveViewportRange(candles, warmupBars, activeViewport),
+    [candles, warmupBars, activeViewport],
+  )
+  const { viewStart, viewEnd, visibleCount: clampedZoom } = resolvedViewport
+  const isFollowingLive = activeViewport.followLive
 
-  const viewEnd = candles.length - clampedPan
-  const viewStart = Math.max(warmupBars, viewEnd - clampedZoom)
+  // Cache closed-bar prefix [0 .. n-2] so intra-bar ticks update only index n-1 in O(1)
+  const closedCount = Math.max(0, candles.length - 1)
+  const closedPrefixKey =
+    closedCount > 0
+      ? `${closedCount}|${candles[0].time}|${candles[closedCount - 1].time}|${candles[closedCount - 1].close}`
+      : 'empty'
 
-  // Compute indicators on the FULL candle spectrum first (Zero Warm-up Cut-off)
-  const fullAnalysis = useMemo(() => {
-    const closes = candles.map((candle) => candle.close)
-    const volumes = candles.map((candle) => candle.volume)
-    const average = params.average === 'ema' ? ema : sma
-    const name = params.average.toUpperCase()
-
-    const fastFull = average(closes, params.fastPeriod)
-    const slowFull = average(closes, params.slowPeriod)
-    const ema50Full = ema(closes, 50)
-    const ema200Full = ema(closes, 200)
-    const bbFull = bollingerBands(closes, 20, 2)
-    const vwapFull = vwap(candles)
-    const volSmaFull = sma(volumes, 20)
-    const atrFull = atr(candles, 14)
-    const rsiFull = rsi(closes, RSI_PERIOD)
-    const macdFull = macd(closes, 12, 26, 9)
-    const signalsFull = crossoverSignals(candles, params)
-
-    return {
-      name,
-      fastFull,
-      slowFull,
-      ema50Full,
-      ema200Full,
-      bbFull,
-      vwapFull,
-      volSmaFull,
-      atrFull,
-      rsiFull,
-      macdFull,
-      signalsFull,
-    }
-  }, [candles, params])
-
-  const displaySourceCandles = useMemo(
-    () => (candleStyle === 'heikin-ashi' ? toHeikinAshi(candles) : candles),
-    [candleStyle, candles],
+  const closedCandles = useMemo(
+    () => (closedCount > 0 ? candles.slice(0, closedCount) : []),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [closedPrefixKey],
   )
 
-  // Slice visible spectrum window [viewStart .. viewEnd]
+  const analysisPrefixCache = useMemo(
+    () => buildAnalysisPrefix(closedCandles, params),
+    [closedCandles, params],
+  )
+
+  const fullAnalysis = useMemo(() => {
+    if (candles.length === 0) return analysisPrefixCache.analysis
+    const liveCandle = candles[candles.length - 1]
+    const prevClosed =
+      closedCandles.length > 0
+        ? closedCandles[closedCandles.length - 1]
+        : null
+    return appendLiveAnalysisTail(
+      analysisPrefixCache,
+      liveCandle,
+      prevClosed,
+      params,
+    )
+  }, [analysisPrefixCache, candles, closedCandles, params])
+
+  // Single Heikin Ashi conversion cached over closed bars + O(1) live tail
+  const haPrefix = useMemo(
+    () => (candleStyle === 'heikin-ashi' ? buildHeikinAshiPrefix(closedCandles) : null),
+    [candleStyle, closedCandles],
+  )
+
+  const displaySourceCandles = useMemo(() => {
+    if (candleStyle !== 'heikin-ashi' || haPrefix === null) return candles
+    if (candles.length === 0) return []
+    return appendHeikinAshiTail(haPrefix, candles[candles.length - 1])
+  }, [candleStyle, haPrefix, candles])
+
+  // Slice visible spectrum window [viewStart .. viewEnd] plus 10-bar overscan
+  // buffers on both edges so GPU translate3d panning glides seamlessly behind clipPath.
+  const PAN_OVERSCAN = 10
+  const ovLeftStart = Math.max(0, viewStart - PAN_OVERSCAN)
+  const ovRightEnd = Math.min(displaySourceCandles.length, viewEnd + PAN_OVERSCAN)
+  const canPanLeft = viewStart > warmupBars
+  const canPanRight = viewEnd < displaySourceCandles.length
+
   const visibleCandles = useMemo(
     () => displaySourceCandles.slice(viewStart, viewEnd),
     [displaySourceCandles, viewStart, viewEnd],
   )
+  const overscanLeftCandles = useMemo(
+    () =>
+      ovLeftStart < viewStart
+        ? displaySourceCandles.slice(ovLeftStart, viewStart)
+        : undefined,
+    [displaySourceCandles, ovLeftStart, viewStart],
+  )
+  const overscanRightCandles = useMemo(
+    () =>
+      viewEnd < ovRightEnd
+        ? displaySourceCandles.slice(viewEnd, ovRightEnd)
+        : undefined,
+    [displaySourceCandles, ovRightEnd, viewEnd],
+  )
 
-  const visibleOverlays: ChartOverlay[] = useMemo(() => {
+  const { visibleOverlays, overscanLeftOverlays, overscanRightOverlays } = useMemo(() => {
     const list: ChartOverlay[] = []
+    const leftList: (number | null)[][] = []
+    const rightList: (number | null)[][] = []
+    const pushOverlay = (
+      id: string,
+      label: string,
+      kind: ChartOverlay['kind'],
+      full: (number | null)[],
+    ) => {
+      list.push({ id, label, kind, values: full.slice(viewStart, viewEnd) })
+      leftList.push(ovLeftStart < viewStart ? full.slice(ovLeftStart, viewStart) : [])
+      rightList.push(viewEnd < ovRightEnd ? full.slice(viewEnd, ovRightEnd) : [])
+    }
+
     if (showFastSlow) {
-      list.push(
-        {
-          id: 'fast',
-          label: `${fullAnalysis.name} ${params.fastPeriod}`,
-          kind: 'fast',
-          values: fullAnalysis.fastFull.slice(viewStart, viewEnd),
-        },
-        {
-          id: 'slow',
-          label: `${fullAnalysis.name} ${params.slowPeriod}`,
-          kind: 'slow',
-          values: fullAnalysis.slowFull.slice(viewStart, viewEnd),
-        },
+      pushOverlay(
+        'fast',
+        `${fullAnalysis.name} ${params.fastPeriod}`,
+        'fast',
+        fullAnalysis.fastFull,
+      )
+      pushOverlay(
+        'slow',
+        `${fullAnalysis.name} ${params.slowPeriod}`,
+        'slow',
+        fullAnalysis.slowFull,
       )
     }
     if (showEma50) {
-      list.push({
-        id: 'ema50',
-        label: 'EMA 50',
-        kind: 'trend',
-        values: fullAnalysis.ema50Full.slice(viewStart, viewEnd),
-      })
+      pushOverlay('ema50', 'EMA 50', 'trend', fullAnalysis.ema50Full)
     }
     if (showEma200) {
-      list.push({
-        id: 'ema200',
-        label: 'EMA 200',
-        kind: 'ema200',
-        values: fullAnalysis.ema200Full.slice(viewStart, viewEnd),
-      })
+      pushOverlay('ema200', 'EMA 200', 'ema200', fullAnalysis.ema200Full)
     }
     if (showBollinger) {
-      list.push(
-        {
-          id: 'bb-upper',
-          label: 'BB Hi',
-          kind: 'bb-upper',
-          values: fullAnalysis.bbFull.upper.slice(viewStart, viewEnd),
-        },
-        {
-          id: 'bb-basis',
-          label: 'BB Mid',
-          kind: 'bb-basis',
-          values: fullAnalysis.bbFull.basis.slice(viewStart, viewEnd),
-        },
-        {
-          id: 'bb-lower',
-          label: 'BB Lo',
-          kind: 'bb-lower',
-          values: fullAnalysis.bbFull.lower.slice(viewStart, viewEnd),
-        },
-      )
+      pushOverlay('bb-upper', 'BB Hi', 'bb-upper', fullAnalysis.bbFull.upper)
+      pushOverlay('bb-basis', 'BB Mid', 'bb-basis', fullAnalysis.bbFull.basis)
+      pushOverlay('bb-lower', 'BB Lo', 'bb-lower', fullAnalysis.bbFull.lower)
     }
     if (showVwap) {
-      list.push({
-        id: 'vwap',
-        label: 'VWAP Session',
-        kind: 'vwap',
-        values: fullAnalysis.vwapFull.slice(viewStart, viewEnd),
-      })
+      pushOverlay('vwap', 'VWAP Session', 'vwap', fullAnalysis.vwapFull)
     }
-    return list
+    return {
+      visibleOverlays: list,
+      overscanLeftOverlays: leftList,
+      overscanRightOverlays: rightList,
+    }
   }, [
     fullAnalysis,
+    ovLeftStart,
+    ovRightEnd,
     params.fastPeriod,
     params.slowPeriod,
     showBollinger,
@@ -461,33 +902,115 @@ function MarketAnalysis({
 
   const visibleVolSma = useMemo(
     () =>
-      showVolumeSma ? fullAnalysis.volSmaFull.slice(viewStart, viewEnd) : undefined,
+      showVolumeSma
+        ? fullAnalysis.volSmaFull.slice(viewStart, viewEnd)
+        : undefined,
     [fullAnalysis.volSmaFull, showVolumeSma, viewEnd, viewStart],
   )
+  const overscanLeftVolSma = useMemo(
+    () =>
+      showVolumeSma && ovLeftStart < viewStart
+        ? fullAnalysis.volSmaFull.slice(ovLeftStart, viewStart)
+        : undefined,
+    [fullAnalysis.volSmaFull, ovLeftStart, showVolumeSma, viewStart],
+  )
+  const overscanRightVolSma = useMemo(
+    () =>
+      showVolumeSma && viewEnd < ovRightEnd
+        ? fullAnalysis.volSmaFull.slice(viewEnd, ovRightEnd)
+        : undefined,
+    [fullAnalysis.volSmaFull, ovRightEnd, showVolumeSma, viewEnd],
+  )
+
+  // Display-only RSI & MACD series feeding existing indicator functions (never alters bot/backtest)
+  const rsiPeriodDisplay =
+    rsiPane.kind === 'rsi' ? rsiPane.settings.period : RSI_PERIOD
+  const macdSettingsDisplay =
+    macdPane.kind === 'macd' ? macdPane.settings : DEFAULT_MACD_SETTINGS
+
+  const displayRsiFull = useMemo(() => {
+    if (rsiPeriodDisplay === RSI_PERIOD) return fullAnalysis.rsiFull
+    return computeRsi(
+      candles.map((c) => c.close),
+      rsiPeriodDisplay,
+    )
+  }, [candles, fullAnalysis.rsiFull, rsiPeriodDisplay])
+
+  const displayMacdFull = useMemo(() => {
+    if (
+      macdSettingsDisplay.fastPeriod === DEFAULT_MACD_SETTINGS.fastPeriod &&
+      macdSettingsDisplay.slowPeriod === DEFAULT_MACD_SETTINGS.slowPeriod &&
+      macdSettingsDisplay.signalPeriod === DEFAULT_MACD_SETTINGS.signalPeriod
+    ) {
+      return fullAnalysis.macdFull
+    }
+    return computeMacd(
+      candles.map((c) => c.close),
+      macdSettingsDisplay.fastPeriod,
+      macdSettingsDisplay.slowPeriod,
+      macdSettingsDisplay.signalPeriod,
+    )
+  }, [candles, fullAnalysis.macdFull, macdSettingsDisplay])
 
   const visibleRsi = useMemo(
-    () => fullAnalysis.rsiFull.slice(viewStart, viewEnd),
-    [fullAnalysis.rsiFull, viewStart, viewEnd],
+    () => displayRsiFull.slice(viewStart, viewEnd),
+    [displayRsiFull, viewStart, viewEnd],
+  )
+  const overscanLeftRsi = useMemo(
+    () =>
+      ovLeftStart < viewStart
+        ? displayRsiFull.slice(ovLeftStart, viewStart)
+        : undefined,
+    [displayRsiFull, ovLeftStart, viewStart],
+  )
+  const overscanRightRsi = useMemo(
+    () =>
+      viewEnd < ovRightEnd
+        ? displayRsiFull.slice(viewEnd, ovRightEnd)
+        : undefined,
+    [displayRsiFull, ovRightEnd, viewEnd],
   )
 
   const visibleMacd = useMemo(
     () => ({
-      macdLine: fullAnalysis.macdFull.macd.slice(viewStart, viewEnd),
-      signalLine: fullAnalysis.macdFull.signal.slice(viewStart, viewEnd),
-      histogram: fullAnalysis.macdFull.histogram.slice(viewStart, viewEnd),
+      macdLine: displayMacdFull.macd.slice(viewStart, viewEnd),
+      signalLine: displayMacdFull.signal.slice(viewStart, viewEnd),
+      histogram: displayMacdFull.histogram.slice(viewStart, viewEnd),
     }),
-    [fullAnalysis.macdFull, viewEnd, viewStart],
+    [displayMacdFull, viewEnd, viewStart],
+  )
+  const overscanLeftMacd = useMemo(
+    () =>
+      ovLeftStart < viewStart
+        ? {
+          macdLine: displayMacdFull.macd.slice(ovLeftStart, viewStart),
+          signalLine: displayMacdFull.signal.slice(ovLeftStart, viewStart),
+          histogram: displayMacdFull.histogram.slice(ovLeftStart, viewStart),
+        }
+        : undefined,
+    [displayMacdFull, ovLeftStart, viewStart],
+  )
+  const overscanRightMacd = useMemo(
+    () =>
+      viewEnd < ovRightEnd
+        ? {
+          macdLine: displayMacdFull.macd.slice(viewEnd, ovRightEnd),
+          signalLine: displayMacdFull.signal.slice(viewEnd, ovRightEnd),
+          histogram: displayMacdFull.histogram.slice(viewEnd, ovRightEnd),
+        }
+        : undefined,
+    [displayMacdFull, ovRightEnd, viewEnd],
   )
 
   const visibleSignals = useMemo(
     () =>
       showSignals
         ? fullAnalysis.signalsFull
-            .filter((s) => s.index >= viewStart && s.index < viewEnd)
-            .map((s) => ({
-              ...s,
-              index: s.index - viewStart,
-            }))
+          .filter((s) => s.index >= viewStart && s.index < viewEnd)
+          .map((s) => ({
+            ...s,
+            index: s.index - viewStart,
+          }))
         : [],
     [fullAnalysis.signalsFull, showSignals, viewEnd, viewStart],
   )
@@ -552,9 +1075,7 @@ function MarketAnalysis({
         kind: 'lock',
         price: lockPrice,
         badge: 'LOCK 50%',
-        label: isEs
-          ? 'PROFIT-LOCK 50% TP (Breakeven)'
-          : 'PROFIT-LOCK 50% TP (Breakeven)',
+        label: 'PROFIT-LOCK 50% TP (Breakeven)',
       },
       {
         id: 'entry',
@@ -562,8 +1083,8 @@ function MarketAnalysis({
         price: entryPrice,
         badge: side === 'buy' ? 'LONG' : 'SHORT',
         label: hasMatchingBotPos
-          ? `BOT ${side === 'buy' ? 'LONG' : 'SHORT'} ACTIVO (${pair})`
-          : `BINANCE ${side === 'buy' ? 'LONG' : 'SHORT'} ENTRY (${pair})`,
+          ? `BOT ${side === 'buy' ? 'LONG' : 'SHORT'} (${pair})`
+          : `${side === 'buy' ? 'LONG' : 'SHORT'} ENTRY (${pair})`,
       },
       {
         id: 'sl',
@@ -576,7 +1097,6 @@ function MarketAnalysis({
   }, [
     botSnapshot?.state.openPosition,
     candles,
-    isEs,
     orderSide,
     pair,
     showOrderLines,
@@ -585,189 +1105,355 @@ function MarketAnalysis({
     visibleCandles.length,
   ])
 
-  const pairDrawings = useMemo(
-    () => drawingsByPair[pair] ?? [],
-    [drawingsByPair, pair],
+  const viewportActionCtxRef = useRef({
+    candles,
+    warmupBars,
+    activeViewport,
+    commitViewport,
+  })
+  useEffect(() => {
+    viewportActionCtxRef.current = {
+      candles,
+      warmupBars,
+      activeViewport,
+      commitViewport,
+    }
+  })
+
+  const handlePanDelta = useCallback((deltaBars: number) => {
+    const ctx = viewportActionCtxRef.current
+    ctx.commitViewport(
+      panViewport(ctx.candles, ctx.warmupBars, ctx.activeViewport, deltaBars),
+    )
+  }, [])
+
+  const handleZoomDelta = useCallback(
+    (deltaBars: number, anchorRatio?: number) => {
+      const ctx = viewportActionCtxRef.current
+      const next = zoomViewport(
+        ctx.candles,
+        ctx.warmupBars,
+        ctx.activeViewport,
+        deltaBars,
+        anchorRatio,
+      )
+      ctx.commitViewport(next, true)
+    },
+    [],
   )
 
-  function handleAddDrawing(drawing: ChartDrawing) {
-    const current = drawingsByPair[pair] ?? []
-    setDrawingsByPair({
-      ...drawingsByPair,
-      [pair]: [...current, drawing],
-    })
-  }
-
-  function handleRemoveDrawing(id: string) {
-    const current = drawingsByPair[pair] ?? []
-    setDrawingsByPair({
-      ...drawingsByPair,
-      [pair]: current.filter((d) => d.id !== id),
-    })
-  }
-
-  function handleUndoDrawing() {
-    const current = drawingsByPair[pair] ?? []
-    if (current.length === 0) return
-    setDrawingsByPair({
-      ...drawingsByPair,
-      [pair]: current.slice(0, -1),
-    })
-  }
-
-  function handleClearDrawings() {
-    setDrawingsByPair({
-      ...drawingsByPair,
-      [pair]: [],
-    })
-  }
-
-  function handlePanDelta(deltaBars: number) {
-    setPanOffset((prev) =>
-      Math.min(maxPanOffset, Math.max(0, prev + deltaBars)),
+  const handleApplyZoomPreset = useCallback((presetBars: number) => {
+    const ctx = viewportActionCtxRef.current
+    const next = applyZoomPreset(
+      ctx.candles,
+      ctx.warmupBars,
+      ctx.activeViewport,
+      presetBars,
     )
-  }
+    ctx.commitViewport(next, true)
+  }, [])
 
-  function handleZoomDelta(deltaBars: number, anchorRatio?: number) {
-    const oldZoom = clampedZoom
-    const nextZoom = Math.min(navigableTotal, Math.max(25, oldZoom + deltaBars))
-    if (nextZoom === oldZoom) return
+  const handleJumpLive = useCallback(() => {
+    const ctx = viewportActionCtxRef.current
+    ctx.commitViewport(jumpViewportToLive(ctx.activeViewport))
+  }, [])
 
-    const effectiveAnchor = anchorRatio ?? (clampedPan === 0 ? 1 : 0.5)
-    const nextMaxPan = Math.max(0, navigableTotal - nextZoom)
-    const nextPan =
-      clampedPan + Math.round((1 - effectiveAnchor) * (oldZoom - nextZoom))
+  const handleResetView = useCallback(() => {
+    const ctx = viewportActionCtxRef.current
+    ctx.commitViewport(createDefaultViewport(DEFAULT_VISIBLE_COUNT), true)
+  }, [])
 
-    setZoomCount(nextZoom)
-    setPanOffset(Math.min(nextMaxPan, Math.max(0, nextPan)))
-  }
-
-  function handleResetView() {
-    setZoomCount(110)
-    setPanOffset(0)
-  }
-
-  function handleJumpToBar(globalIndex: number) {
-    const desiredRightEdgeOffset = Math.max(
-      0,
-      Math.min(
-        maxPanOffset,
-        candles.length - 1 - globalIndex - Math.floor(clampedZoom * 0.35),
-      ),
-    )
-    const targetEnd = candles.length - desiredRightEdgeOffset
-    const targetStart = Math.max(warmupBars, targetEnd - clampedZoom)
-    setPanOffset(desiredRightEdgeOffset)
-    const localIdx = globalIndex - targetStart
-    if (localIdx >= 0 && localIdx < clampedZoom) {
-      setHoverIndex(localIdx)
-    }
-  }
-
-  function handleApplyPreset(preset: StrategyPreset) {
-    onSelectPair?.(preset.strategy.pair)
-    onSelectTimeframe?.(preset.timeframe)
-    onChangeParams?.(preset.signalParams)
-    onSaveStrategy?.(preset.strategy)
-  }
-
-  async function handleExecuteQuickDemoOrder(overrideSide?: 'buy' | 'sell') {
-    if (visibleCandles.length === 0 || submittingOrder) return
-    const execSide = overrideSide ?? orderSide
-    setSubmittingOrder(true)
-    setOrderFeedback(null)
-    const stakeUsd = Math.max(
-      10,
-      Math.round(orderSizeUsd > 0 ? orderSizeUsd : 10_000 * ((strategy?.positionSize ?? 10) / 100)),
-    )
-
-    try {
-      const response = await submitDemoOrderOnServer({
-        pair,
-        side: execSide === 'buy' ? 'BUY' : 'SELL',
-        notionalUsd: stakeUsd,
-      })
-      const latestOrder = response.order
-      if (response.ok && latestOrder.status === 'FILLED') {
-        setOrderFeedback(
-          isEs
-            ? `Orden ${latestOrder.side} ejecutada en ${pair} @ $${latestOrder.price.toLocaleString('en-US')} ($${stakeUsd} USD)`
-            : `${latestOrder.side} order filled on ${pair} @ $${latestOrder.price.toLocaleString('en-US')} ($${stakeUsd} USD)`,
-        )
-      } else {
-        setOrderFeedback(
-          response.error ??
-            latestOrder.reason ??
-            (isEs
-              ? 'Orden rechazada por límites de riesgo'
-              : 'Order rejected by risk limits'),
-        )
-      }
-    } catch {
-      setOrderFeedback(
-        isEs
-          ? 'Error al conectar con el adaptador de órdenes Demo'
-          : 'Failed to connect to Demo order adapter',
+  const handleJumpToBar = useCallback(
+    (globalIndex: number) => {
+      const ctx = viewportActionCtxRef.current
+      const { viewport: nextVp, localIndex } = jumpViewportToIndex(
+        ctx.candles,
+        ctx.warmupBars,
+        ctx.activeViewport,
+        globalIndex,
       )
-    } finally {
-      setSubmittingOrder(false)
-    }
-  }
+      ctx.commitViewport(nextVp)
+      if (localIndex !== null) {
+        crosshairChannel.set(localIndex)
+      }
+    },
+    [crosshairChannel],
+  )
+
+  const handleApplyPreset = useCallback(
+    (preset: StrategyPreset) => {
+      onSelectPair?.(preset.strategy.pair)
+      onSelectTimeframe?.(preset.timeframe)
+      onChangeParams?.(preset.signalParams)
+      onSaveStrategy?.(preset.strategy)
+    },
+    [onChangeParams, onSaveStrategy, onSelectPair, onSelectTimeframe],
+  )
+
+  const handleExecuteQuickDemoOrder = useCallback(
+    async (overrideSide?: 'buy' | 'sell') => {
+      if (visibleCandles.length === 0 || submittingOrder) return
+      const execSide = overrideSide ?? orderSide
+      setSubmittingOrder(true)
+      setOrderFeedback(null)
+      const stakeUsd =
+        orderSizeUsd > 0
+          ? Math.round(orderSizeUsd)
+          : botSnapshot && botSnapshot.state.balance > 0
+            ? Math.round(
+                botSnapshot.state.balance *
+                  ((strategy?.positionSize ?? 10) / 100),
+              )
+            : 0
+      if (stakeUsd < 10) {
+        setOrderFeedback(t('studio.orderRejected'))
+        setSubmittingOrder(false)
+        return
+      }
+
+      try {
+        const response = await submitExchangeOrderOnServer({
+          pair,
+          side: execSide === 'buy' ? 'BUY' : 'SELL',
+          notionalUsd: stakeUsd,
+        })
+        const latestOrder = response.order
+        if (response.ok && latestOrder.status === 'FILLED') {
+          setOrderFeedback(
+            t('studio.orderFilled', {
+              side: latestOrder.side,
+              pair,
+              price: latestOrder.price.toLocaleString('en-US'),
+              usd: stakeUsd,
+            }),
+          )
+        } else {
+          setOrderFeedback(
+            response.error ?? latestOrder.reason ?? t('studio.orderRejected'),
+          )
+        }
+      } catch (err) {
+        setOrderFeedback(
+          err instanceof Error ? err.message : t('studio.orderError'),
+        )
+      } finally {
+        setSubmittingOrder(false)
+      }
+    },
+    [
+      botSnapshot,
+      orderSide,
+      orderSizeUsd,
+      pair,
+      strategy?.positionSize,
+      submittingOrder,
+      t,
+      visibleCandles.length,
+    ],
+  )
+
+  const handleSidebarSubmitOrder = useCallback(
+    (side: 'buy' | 'sell') => {
+      void handleExecuteQuickDemoOrder(side)
+    },
+    [handleExecuteQuickDemoOrder],
+  )
 
   const drawToolItems = useMemo(
     () =>
       [
         {
           id: 'cursor',
-          label: isEs ? 'Cursor' : 'Cursor',
-          title: isEs
-            ? 'Arrastrar espectro y navegar con controles de gráfica'
-            : 'Drag spectrum and navigate with chart controls',
+          label: t('studio.toolCursor'),
+          title: t('studio.toolCursorHint'),
           Icon: Crosshair,
         },
         {
           id: 'measure',
           label: t('studio.measure'),
-          title: isEs
-            ? 'Medir rango Δ% y barras entre dos velas (2 clics)'
-            : 'Measure % delta and bar count between two points (2 clicks)',
+          title: t('studio.toolMeasureHint'),
           Icon: Ruler,
         },
         {
           id: 'trendline',
-          label: isEs ? 'Tendencia' : 'Trendline',
-          title: isEs
-            ? 'Dibujar línea de tendencia con pendiente % (2 clics)'
-            : 'Draw trendline with % slope (2 clicks)',
+          label: t('studio.toolTrendline'),
+          title: t('studio.toolTrendlineHint'),
           Icon: TrendingUp,
         },
         {
           id: 'horizontal',
-          label: isEs ? 'Nivel S/R' : 'S/R Level',
-          title: isEs
-            ? 'Trazar soporte o resistencia horizontal (1 clic)'
-            : 'Plot horizontal support/resistance (1 click)',
+          label: t('studio.toolHorizontal'),
+          title: t('studio.toolHorizontalHint'),
           Icon: Minus,
         },
         {
           id: 'fib',
-          label: 'Fibonacci',
-          title: isEs
-            ? 'Trazar retroceso Fibonacci 0% – 100% (2 clics)'
-            : 'Plot Fibonacci retracement 0% – 100% (2 clicks)',
+          label: t('studio.toolFib'),
+          title: t('studio.toolFibHint'),
           Icon: Layers,
         },
       ] as const,
-    [isEs, t],
+    [t],
   )
 
+  // Single canonical live price source shared by header, in-chart tag, alerts, and order lines
   const latestBar = candles[candles.length - 1]
-  const prevBar = candles[candles.length - 2]
-  const spotClose = latestBar?.close ?? 0
-  const spotChangePct =
-    latestBar && prevBar && prevBar.close > 0
-      ? ((latestBar.close - prevBar.close) / prevBar.close) * 100
-      : 0
+  const livePrice = latestBar?.close ?? null
+  const livePriceIsUp = latestBar ? latestBar.close >= latestBar.open : true
+
+  // Phase 6: Client-only price alerts persisted in `flare:chart-alerts`
+  const [alerts, setAlerts] = useState<ChartAlert[]>(() => loadChartAlerts())
+  const alertsRef = useRef<ChartAlert[]>(alerts)
+  const [firedBannerAlerts, setFiredBannerAlerts] = useState<ChartAlert[]>([])
+  const [highlightedAlertId, setHighlightedAlertId] = useState<string | null>(
+    null,
+  )
+  const [orderPrefill, setOrderPrefill] = useState<OrderPrefillIntent | null>(
+    null,
+  )
+  const [alertAnnouncement, setAlertAnnouncement] = useState<string>('')
+  const highlightTimerRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    alertsRef.current = alerts
+    saveChartAlerts(alerts)
+  }, [alerts])
+
+  useEffect(() => {
+    return () => {
+      if (highlightTimerRef.current !== null) {
+        window.clearTimeout(highlightTimerRef.current)
+      }
+    }
+  }, [])
+
+  // Evaluate armed client-only alerts against live price (not candle close)
+  useEffect(() => {
+    if (livePrice === null) return
+    const frame = requestAnimationFrame(() => {
+      const result = evaluateAlerts(alertsRef.current, pair, livePrice)
+      if (result.newlyTriggered.length === 0) return
+      alertsRef.current = result.nextAlerts
+      setAlerts(result.nextAlerts)
+      setFiredBannerAlerts((prev) => {
+        const seen = new Set(prev.map((item) => item.id))
+        const fresh = result.newlyTriggered.filter((item) => !seen.has(item.id))
+        return fresh.length > 0 ? [...fresh, ...prev].slice(0, 4) : prev
+      })
+      const lead = result.newlyTriggered[0]
+      setAlertAnnouncement(
+        t('studio.alertFiredBanner', {
+          pair: lead.pair,
+          dir:
+            lead.direction === 'above'
+              ? t('studio.alertAbove')
+              : t('studio.alertBelow'),
+          price: formatPrice(lead.price),
+        }),
+      )
+      if (soundAlerts) {
+        playAlertChime()
+      }
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [alerts, livePrice, pair, soundAlerts, t])
+
+  const pairAlerts = useMemo(
+    () => alerts.filter((a) => a.pair === pair),
+    [alerts, pair],
+  )
+
+  const handleAddAlert = useCallback(
+    (price: number, direction?: ChartAlertDirection) => {
+      const created = createChartAlert({
+        pair,
+        interval: timeframe,
+        price,
+        livePrice,
+        direction,
+      })
+      setAlerts((prev) => [created, ...prev])
+      setHighlightedAlertId(created.id)
+      if (highlightTimerRef.current !== null) {
+        window.clearTimeout(highlightTimerRef.current)
+      }
+      highlightTimerRef.current = window.setTimeout(() => {
+        setHighlightedAlertId(null)
+      }, 2200)
+    },
+    [livePrice, pair, timeframe],
+  )
+
+  const handleCreateAlertAtPrice = useCallback(
+    (price: number) => {
+      handleAddAlert(price)
+    },
+    [handleAddAlert],
+  )
+
+  const handleToggleAlert = useCallback((id: string) => {
+    setAlerts((prev) => toggleAlertEnabled(prev, id))
+  }, [])
+
+  const handleRearmAlert = useCallback((id: string) => {
+    setAlerts((prev) => rearmAlert(prev, id))
+    setFiredBannerAlerts((prev) => prev.filter((item) => item.id !== id))
+  }, [])
+
+  const handleRemoveAlert = useCallback((id: string) => {
+    setAlerts((prev) => removeAlert(prev, id))
+    setFiredBannerAlerts((prev) => prev.filter((item) => item.id !== id))
+  }, [])
+
+  const handleDismissFiredAlert = useCallback((id: string) => {
+    setFiredBannerAlerts((prev) => prev.filter((item) => item.id !== id))
+  }, [])
+
+  const handleJumpToAlert = useCallback(
+    (alert: ChartAlert) => {
+      if (!isFollowingLive) {
+        handleJumpLive()
+      }
+      setHighlightedAlertId(alert.id)
+      if (highlightTimerRef.current !== null) {
+        window.clearTimeout(highlightTimerRef.current)
+      }
+      highlightTimerRef.current = window.setTimeout(() => {
+        setHighlightedAlertId(null)
+      }, 2400)
+    },
+    [handleJumpLive, isFollowingLive],
+  )
+
+  // Phase 6: Order-at-price = prefill only (opens & focuses StudioSidebar Trade tab; never auto-submits)
+  const handlePrefillOrderAtPrice = useCallback(
+    (side: TradeSide, referencePrice: number) => {
+      setOrderSide(side)
+      setOrderPrefill((prev) => ({
+        nonce: (prev?.nonce ?? 0) + 1,
+        pair,
+        side,
+        referencePrice,
+      }))
+      if (isWideViewport) {
+        updatePref('showRightPanel', true)
+      } else {
+        setNarrowPanelOpen(true)
+      }
+    },
+    [isWideViewport, pair, updatePref],
+  )
+
+  const handleClearOrderPrefill = useCallback(() => {
+    setOrderPrefill(null)
+  }, [])
+
+  const activeToolLabel =
+    drawToolItems.find((item) => item.id === drawingMode)?.label ?? ''
+
+  const change24h = useMemo(() => compute24hChangePct(candles), [candles])
+  const spotChangePct = change24h?.changePct ?? 0
+  const is24hChange = change24h?.is24h ?? false
   const sessionHigh = useMemo(
     () =>
       visibleCandles.reduce(
@@ -784,8 +1470,10 @@ function MarketAnalysis({
       ),
     [visibleCandles],
   )
-  const latestAtr14 = fullAnalysis.atrFull[fullAnalysis.atrFull.length - 1] ?? null
-  const latestVwap = fullAnalysis.vwapFull[fullAnalysis.vwapFull.length - 1] ?? null
+  const latestAtr14 =
+    fullAnalysis.atrFull[fullAnalysis.atrFull.length - 1] ?? null
+  const latestVwap =
+    fullAnalysis.vwapFull[fullAnalysis.vwapFull.length - 1] ?? null
 
   const activeIndicatorsCount = [
     showFastSlow,
@@ -800,19 +1488,119 @@ function MarketAnalysis({
     showMacd,
   ].filter(Boolean).length
 
+  const liveStatusLabel =
+    streamStatus === 'ws'
+      ? t('terminal.liveWs')
+      : streamStatus === 'poll'
+        ? t('terminal.liveSync')
+        : streamStatus === 'connecting'
+          ? t('terminal.liveConnecting')
+          : t('terminal.liveStatic')
+
+  const liveClockText = formatUtcClock(lastTickAt)
+
+  const visiblePanes = useMemo(() => panes.filter((p) => p.visible), [panes])
+
+  const addPaneMenu = (
+    <Popover>
+      <PopoverTrigger asChild>
+        <Button
+          type="button"
+          variant="outline"
+          size="xs"
+          aria-label={t('studio.addPane')}
+          className="h-6 gap-1 px-2 font-mono text-[10px]"
+        >
+          <Plus className="size-3 text-primary" />
+          <span className="hidden md:inline">{t('studio.addPane')}</span>
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-48 p-2">
+        <div className="flex flex-col gap-1">
+          <span className="px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-[0.07em] text-muted-foreground">
+            {t('studio.panesGroup')}
+          </span>
+          {panes.map((pane) => {
+            const label =
+              pane.kind === 'rsi'
+                ? `RSI (${pane.settings.period})`
+                : `MACD (${pane.settings.fastPeriod}, ${pane.settings.slowPeriod}, ${pane.settings.signalPeriod})`
+            return (
+              <button
+                key={pane.id}
+                type="button"
+                onClick={() => handleSetPaneVisible(pane.kind, !pane.visible)}
+                className={cn(
+                  'flex w-full items-center justify-between gap-2 rounded-[4px] px-2 py-1.5 text-left font-mono text-[11px] transition-colors cursor-pointer',
+                  pane.visible
+                    ? 'bg-primary/12 font-semibold text-foreground'
+                    : 'text-muted-foreground hover:bg-muted/45 hover:text-foreground',
+                )}
+              >
+                <span>{label}</span>
+                {pane.visible && <Check className="size-3 text-primary" />}
+              </button>
+            )
+          })}
+        </div>
+      </PopoverContent>
+    </Popover>
+  )
+
+  const candleStyleSelector = (
+    <div
+      className="inline-flex h-6 items-center gap-0.5 rounded-sm bg-muted/45 p-0.5"
+      role="group"
+      aria-label={t('studio.candleStyle')}
+    >
+      {(
+        [
+          { id: 'candles', label: t('studio.styleCandles') },
+          { id: 'hollow', label: t('studio.styleHollow') },
+          { id: 'heikin-ashi', label: t('studio.styleHeikin') },
+        ] as const
+      ).map((opt) => (
+        <button
+          key={opt.id}
+          type="button"
+          onClick={() => updatePref('candleStyle', opt.id)}
+          className={cn(
+            'inline-flex h-5 items-center justify-center whitespace-nowrap rounded-[4px] px-1.5 font-mono text-[10px] font-medium transition-all duration-150 cursor-pointer',
+            candleStyle === opt.id
+              ? 'bg-card font-semibold text-foreground'
+              : 'text-muted-foreground hover:text-foreground',
+          )}
+        >
+          {opt.label}
+        </button>
+      ))}
+    </div>
+  )
+
   const indicatorMenu = (
     <Popover>
       <PopoverTrigger asChild>
-        <Button type="button" variant="outline" size="xs" className="gap-1.5">
+        <Button type="button" variant="outline" size="xs" className="h-6 gap-1 px-2">
           <SlidersHorizontal className="size-3 text-primary" />
-          <span>{t('studio.indicators')}</span>
-          <Badge variant="secondary" className="px-1 py-0 text-[9.5px] tabular-nums">
+          <span className="hidden sm:inline">{t('studio.indicators')}</span>
+          <Badge
+            variant="secondary"
+            className="px-1 py-0 text-[9.5px] tabular-nums"
+          >
             {activeIndicatorsCount}
           </Badge>
         </Button>
       </PopoverTrigger>
       <PopoverContent align="end" className="w-64 p-3">
         <div className="flex flex-col gap-2.5">
+          <div className="flex flex-col gap-1.5 xl:hidden">
+            <span className="font-mono text-[10px] font-semibold uppercase tracking-[0.07em] text-muted-foreground">
+              {t('studio.candleStyle')}
+            </span>
+            {candleStyleSelector}
+            <Separator />
+          </div>
+
           <span className="font-mono text-[10px] font-semibold uppercase tracking-[0.07em] text-muted-foreground">
             {t('studio.overlaysGroup')}
           </span>
@@ -838,20 +1626,23 @@ function MarketAnalysis({
               },
               {
                 key: 'showSignals',
-                label: isEs ? 'Señales de cruce' : 'Crossover Signals',
+                label: t('studio.overlaySignals'),
                 checked: showSignals,
               },
               {
                 key: 'showOrderLines',
-                label: isEs ? 'Niveles TP / SL / Lock' : 'TP / SL / Lock Lines',
+                label: t('studio.overlayOrderLines'),
                 checked: showOrderLines,
               },
             ] as const
           ).map((item) => (
-            <div key={item.key} className="flex items-center justify-between gap-2">
+            <div
+              key={item.key}
+              className="flex items-center justify-between gap-2"
+            >
               <Label
                 htmlFor={`ind-${item.key}`}
-                className="cursor-pointer font-mono text-[11px] font-medium text-foreground"
+                className="cursor-pointer text-xs font-medium text-foreground"
               >
                 {item.label}
               </Label>
@@ -868,789 +1659,761 @@ function MarketAnalysis({
           <span className="font-mono text-[10px] font-semibold uppercase tracking-[0.07em] text-muted-foreground">
             {t('studio.panesGroup')}
           </span>
-          {(
-            [
-              { key: 'showRsi', label: `RSI (${RSI_PERIOD})`, checked: showRsi },
-              { key: 'showMacd', label: 'MACD (12, 26, 9)', checked: showMacd },
-            ] as const
-          ).map((item) => (
-            <div key={item.key} className="flex items-center justify-between gap-2">
-              <Label
-                htmlFor={`ind-${item.key}`}
-                className="cursor-pointer font-mono text-[11px] font-medium text-foreground"
+          {panes.map((pane) => {
+            const label =
+              pane.kind === 'rsi'
+                ? `RSI (${pane.settings.period})`
+                : `MACD (${pane.settings.fastPeriod}, ${pane.settings.slowPeriod}, ${pane.settings.signalPeriod})`
+            return (
+              <div
+                key={pane.id}
+                className="flex items-center justify-between gap-2"
               >
-                {item.label}
-              </Label>
-              <Checkbox
-                id={`ind-${item.key}`}
-                checked={item.checked}
-                onCheckedChange={(v) => updatePref(item.key, Boolean(v))}
-              />
-            </div>
-          ))}
+                <Label
+                  htmlFor={`ind-pane-${pane.id}`}
+                  className="cursor-pointer text-xs font-medium text-foreground"
+                >
+                  {label}
+                </Label>
+                <Checkbox
+                  id={`ind-pane-${pane.id}`}
+                  checked={pane.visible}
+                  onCheckedChange={(v) =>
+                    handleSetPaneVisible(pane.kind, Boolean(v))
+                  }
+                />
+              </div>
+            )
+          })}
         </div>
       </PopoverContent>
     </Popover>
   )
 
-  const candleStyleSelector = (
-    <div
-      className="inline-flex h-7 items-center gap-0.5 rounded-sm border border-border bg-secondary/65 p-0.5"
-      role="group"
-      aria-label={t('studio.candleStyle')}
-    >
-      {(
-        [
-          { id: 'candles', label: t('studio.styleCandles') },
-          { id: 'hollow', label: t('studio.styleHollow') },
-          { id: 'heikin-ashi', label: t('studio.styleHeikin') },
-        ] as const
-      ).map((opt) => (
-        <button
-          key={opt.id}
-          type="button"
-          onClick={() => updatePref('candleStyle', opt.id)}
-          className={cn(
-            'inline-flex h-[22px] items-center justify-center whitespace-nowrap rounded-[4px] border px-2 font-mono text-[10.5px] font-medium transition-all duration-150 cursor-pointer',
-            candleStyle === opt.id
-              ? 'border-border bg-card font-semibold text-foreground shadow-[0_1px_2px_rgba(0,0,0,0.18)]'
-              : 'border-transparent text-muted-foreground hover:text-foreground',
-          )}
-        >
-          {opt.label}
-        </button>
-      ))}
-    </div>
-  )
-
   const zoomPresetsControl = (
-    <div
-      className="inline-flex h-7 items-center gap-0.5 rounded-sm border border-border bg-secondary/65 p-0.5"
-      role="group"
-    >
-      {ZOOM_PRESETS.map((preset) => {
-        const isAll = preset >= navigableTotal
-        const targetCount = isAll ? navigableTotal : preset
-        const active = Math.abs(clampedZoom - targetCount) <= 2
-        return (
-          <button
-            key={preset}
-            type="button"
-            className={cn(
-              'inline-flex h-[22px] min-w-[40px] items-center justify-center whitespace-nowrap rounded-[4px] border px-2 font-mono text-[10.5px] font-medium tabular-nums transition-all duration-150 cursor-pointer',
-              active
-                ? 'border-border bg-card font-semibold text-foreground shadow-[0_1px_2px_rgba(0,0,0,0.18)]'
-                : 'border-transparent text-muted-foreground hover:text-foreground',
-            )}
-            onClick={() => {
-              setZoomCount(targetCount)
-              if (isAll) setPanOffset(0)
-            }}
-          >
-            {isAll ? (isEs ? 'Todo' : 'All') : `${preset}V`}
-          </button>
-        )
-      })}
-    </div>
+    <Popover>
+      <PopoverTrigger asChild>
+        <Button
+          type="button"
+          variant="outline"
+          size="xs"
+          aria-label={t('studio.zoomPresets')}
+          className="h-6 gap-1 px-2 font-mono text-[10px] tabular-nums"
+        >
+          <span>{visibleCandles.length}V</span>
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-52 p-2.5">
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center justify-between gap-2">
+            <span className="font-mono text-[10px] font-semibold uppercase tracking-[0.07em] text-muted-foreground">
+              {t('studio.zoomPresets')}
+            </span>
+            <span className="font-mono text-[10px] text-muted-foreground tabular-nums">
+              {visibleCandles.length}/{navigableTotal}
+            </span>
+          </div>
+          <div className="grid grid-cols-5 gap-1">
+            {ZOOM_PRESETS.map((preset) => {
+              const isAll = preset >= navigableTotal
+              const targetCount = isAll ? navigableTotal : preset
+              const active = Math.abs(clampedZoom - targetCount) <= 2
+              return (
+                <button
+                  key={preset}
+                  type="button"
+                  className={cn(
+                    'inline-flex h-6 items-center justify-center rounded-[4px] font-mono text-[10px] font-medium tabular-nums transition-all duration-150 cursor-pointer',
+                    active
+                      ? 'bg-primary text-primary-foreground font-semibold'
+                      : 'bg-muted/45 text-muted-foreground hover:text-foreground',
+                  )}
+                  onClick={() => handleApplyZoomPreset(preset)}
+                >
+                  {isAll ? t('studio.allBars') : `${preset}`}
+                </button>
+              )
+            })}
+          </div>
+          <p className="text-[10.5px] leading-snug text-muted-foreground">
+            {t('studio.wheelPanHint')}
+          </p>
+        </div>
+      </PopoverContent>
+    </Popover>
   )
 
-  if (isExpanded) {
-    const subPaneHeight = showRsi && showMacd ? 80 : 108
-    const candleChrome = 96
-    const subPaneChrome = 46
-    const totalReserved =
-      16 +
-      candleChrome +
-      (showRsi ? subPaneHeight + subPaneChrome : 0) +
-      (showMacd ? subPaneHeight + subPaneChrome : 0)
-    const expandedCandleHeight = Math.max(220, expandedStackHeight - totalReserved)
+  const calibrateLabel = coinProfile
+    ? isEs
+      ? coinProfile.presetBadgeEs
+      : coinProfile.presetBadgeEn
+    : ''
 
-    return (
-      <div
-        className="fixed inset-0 z-50 flex h-dvh w-screen flex-col overflow-hidden bg-background text-foreground"
-        role="dialog"
-        aria-modal="true"
-        aria-label={`${pair} Chart Studio`}
+  return (
+    <div
+      data-slot="chart-workspace"
+      data-expanded={isExpanded ? 'true' : 'false'}
+      data-density={density}
+      role={isExpanded ? 'dialog' : 'region'}
+      aria-modal={isExpanded ? true : undefined}
+      aria-label={t('studio.workspaceAria', { pair })}
+      className={cn(
+        'flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background text-foreground',
+        isExpanded && 'fixed inset-0 z-50 h-dvh w-screen',
+      )}
+    >
+      {/* Screen-reader live region for drawing mode switches and triggered alerts */}
+      <div className="sr-only" role="status" aria-live="polite">
+        {alertAnnouncement || t('studio.modeAnnounced', { mode: activeToolLabel })}
+      </div>
+
+      {/* Unified Workspace Header */}
+      <header
+        className={cn(
+          'flex shrink-0 items-center justify-between gap-2 overflow-x-auto overflow-y-hidden bg-card [scrollbar-width:none]',
+          isCompactDensity ? 'h-8 px-2' : 'h-9 px-2.5',
+        )}
       >
-        {/* Top Workstation Header */}
-        <header className="flex h-11 shrink-0 items-center justify-between gap-2 overflow-x-auto overflow-y-hidden border-b border-border bg-card px-3 [scrollbar-width:none]">
-          <div className="flex shrink-0 flex-nowrap items-center gap-2.5 whitespace-nowrap">
-            {onSelectPair ? (
-              <Select value={pair} onValueChange={onSelectPair}>
-                <SelectTrigger className="h-7 !w-auto min-w-[116px] shrink-0 border-border bg-secondary/70 px-2 font-mono text-xs font-bold">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {availablePairs.map((p) => (
-                    <SelectItem key={p} value={p}>
-                      {p}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            ) : (
-              <span className="shrink-0 font-mono text-xs font-bold text-foreground">
-                {pair}
-              </span>
-            )}
+        <div className="flex shrink-0 flex-nowrap items-center gap-2 whitespace-nowrap">
+          {onSelectPair ? (
+            <Select value={pair} onValueChange={onSelectPair}>
+              <SelectTrigger
+                aria-label={t('market.pairAria')}
+                className="h-6 !w-auto min-w-[104px] shrink-0 bg-muted/45 px-2 font-mono text-xs font-bold"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {availablePairs.map((p) => (
+                  <SelectItem key={p} value={p}>
+                    {p}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          ) : (
+            <span className="shrink-0 font-mono text-xs font-bold text-foreground">
+              {pair}
+            </span>
+          )}
 
-            <div className="flex shrink-0 flex-nowrap items-baseline gap-2 whitespace-nowrap font-mono tabular-nums">
-              <span className="text-sm font-bold text-foreground">
-                ${formatPrice(spotClose)}
-              </span>
+          <div className="flex shrink-0 flex-nowrap items-baseline gap-1.5 whitespace-nowrap font-mono tabular-nums">
+            <span className="text-xs font-bold text-foreground">
+              {livePrice !== null ? `$${formatPrice(livePrice)}` : '—'}
+            </span>
+            <span
+              className={cn(
+                'text-[10.5px] font-semibold',
+                spotChangePct >= 0
+                  ? 'text-[var(--positive)]'
+                  : 'text-[var(--negative)]',
+              )}
+            >
+              {spotChangePct >= 0 ? '+' : ''}
+              {spotChangePct.toFixed(2)}%
+              {is24hChange && (
+                <span className="ml-0.5 text-[9.5px] font-normal text-muted-foreground">
+                  {t('studio.change24h')}
+                </span>
+              )}
+            </span>
+            <span className="hidden shrink-0 whitespace-nowrap text-[10px] text-muted-foreground 2xl:inline">
+              H ${formatPrice(sessionHigh)} · L ${formatPrice(sessionLow)}
+            </span>
+            {liveMetrics && (
               <span
                 className={cn(
-                  'text-[11px] font-semibold',
-                  spotChangePct >= 0
+                  'hidden shrink-0 whitespace-nowrap text-[10px] font-semibold 2xl:inline',
+                  liveMetrics.emaDistPct >= 0
                     ? 'text-[var(--positive)]'
                     : 'text-[var(--negative)]',
                 )}
               >
-                {spotChangePct >= 0 ? '+' : ''}
-                {spotChangePct.toFixed(2)}%
+                EMA50 {liveMetrics.emaDistPct >= 0 ? '▲' : '▼'}
+                {Math.abs(liveMetrics.emaDistPct).toFixed(2)}%
               </span>
-              <span className="hidden shrink-0 whitespace-nowrap text-[10.5px] text-muted-foreground xl:inline">
-                H ${formatPrice(sessionHigh)} · L ${formatPrice(sessionLow)}
-              </span>
-            </div>
-
-            {(streamStatus === 'ws' || streamStatus === 'poll') && (
-              <Badge variant="positive" className="text-[9.5px]">
-                {streamStatus === 'ws' ? 'WS LIVE' : 'LIVE'}
-              </Badge>
-            )}
-            {candleStyle === 'heikin-ashi' && (
-              <Badge variant="violet" className="text-[9.5px]">
-                HA
-              </Badge>
             )}
           </div>
 
-          <div className="flex shrink-0 items-center gap-2">
-            {onSelectTimeframe && (
-              <div
-                className="inline-flex h-7 items-center gap-0.5 rounded-sm border border-border bg-secondary/65 p-0.5"
-                role="group"
-                aria-label={t('market.timeframeAria')}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Badge
+                variant={
+                  streamStatus === 'ws'
+                    ? 'positive'
+                    : streamStatus === 'poll'
+                      ? 'default'
+                      : 'secondary'
+                }
+                aria-live="polite"
+                className="h-5 gap-1 px-1.5 font-mono text-[9.5px]"
               >
-                {(['5m', '15m', '1h', '4h', '1d'] as const).map((tf) => (
-                  <button
-                    key={tf}
-                    type="button"
-                    onClick={() => onSelectTimeframe(tf)}
-                    className={cn(
-                      'inline-flex h-[22px] items-center justify-center rounded-[4px] border px-2 font-mono text-[10.5px] font-semibold transition-all duration-150 cursor-pointer',
-                      timeframe === tf
-                        ? 'border-border bg-card text-primary shadow-[0_1px_2px_rgba(0,0,0,0.18)]'
-                        : 'border-transparent text-muted-foreground hover:text-foreground',
-                    )}
-                  >
-                    {tf}
-                  </button>
-                ))}
-              </div>
-            )}
+                <span
+                  className={cn(
+                    'size-1.5 rounded-full',
+                    streamStatus === 'ws'
+                      ? 'bg-[var(--positive)]'
+                      : streamStatus === 'poll'
+                        ? 'bg-primary'
+                        : 'bg-muted-foreground',
+                  )}
+                />
+                <span>{liveStatusLabel}</span>
+              </Badge>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">
+              {liveStatusLabel} · {liveClockText} UTC ·{' '}
+              {isFollowingLive ? t('studio.followLive') : t('studio.followPaused')}
+            </TooltipContent>
+          </Tooltip>
 
-            <div className="hidden md:flex">{candleStyleSelector}</div>
-            {indicatorMenu}
-
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  type="button"
-                  size="icon-xs"
-                  variant="outline"
-                  onClick={handleResetView}
-                  aria-label={t('studio.resetView')}
-                >
-                  <RotateCcw className="size-3.5" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="bottom">{t('studio.resetView')}</TooltipContent>
-            </Tooltip>
-
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  type="button"
-                  size="icon-xs"
-                  variant={showRightPanel ? 'default' : 'outline'}
-                  onClick={() => updatePref('showRightPanel', !showRightPanel)}
-                  aria-label={t('studio.togglePanel')}
-                >
-                  <PanelRight className="size-3.5" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="bottom">{t('studio.togglePanel')}</TooltipContent>
-            </Tooltip>
-
+          {!isFollowingLive && (
             <Button
               type="button"
+              variant="default"
               size="xs"
-              variant="outline"
-              onClick={() => setIsExpanded(false)}
-              className="gap-1.5 font-mono"
+              onClick={handleJumpLive}
+              className="h-5 shrink-0 px-2 font-mono text-[10px]"
             >
-              <Minimize2 className="size-3" />
-              <span>{t('studio.collapse')}</span>
-              <span className="hidden text-[9.5px] text-muted-foreground sm:inline">
-                Esc
-              </span>
+              {t('studio.jumpLive')}
             </Button>
-          </div>
-        </header>
+          )}
 
-        {/* Main Split Workspace */}
-        <div className="flex min-h-0 flex-1 flex-col overflow-hidden lg:flex-row">
-          {/* Left Vertical Drawing Rail */}
-          <nav
-            aria-label="Chart drawing tools"
-            className="hidden w-11 shrink-0 flex-col items-center gap-1 border-r border-border bg-card/65 py-2 sm:flex"
-          >
-            {drawToolItems.map(({ id, label, title, Icon }) => {
-              const active = drawingMode === id
-              return (
-                <Tooltip key={id}>
-                  <TooltipTrigger asChild>
-                    <Button
-                      type="button"
-                      size="icon-sm"
-                      variant={active ? 'default' : 'ghost'}
-                      onClick={() => setDrawingMode(id)}
-                      aria-label={label}
-                      aria-pressed={active}
-                    >
-                      <Icon className="size-3.5" />
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent side="right">{title}</TooltipContent>
-                </Tooltip>
-              )
-            })}
-
-            <Separator className="my-1 w-6" />
-
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  type="button"
-                  size="icon-sm"
-                  variant={magnetSnap ? 'secondary' : 'ghost'}
-                  onClick={() => updatePref('magnetSnap', !magnetSnap)}
-                  aria-label={t('studio.magnet')}
-                  aria-pressed={magnetSnap}
-                  className={cn(magnetSnap && 'border-primary/45 text-primary')}
-                >
-                  <Magnet className="size-3.5" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="right">{t('studio.magnet')}</TooltipContent>
-            </Tooltip>
-
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  type="button"
-                  size="icon-sm"
-                  variant="ghost"
-                  disabled={pairDrawings.length === 0}
-                  onClick={handleUndoDrawing}
-                  aria-label={t('studio.undo')}
-                >
-                  <Undo2 className="size-3.5" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="right">{t('studio.undo')}</TooltipContent>
-            </Tooltip>
-
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  type="button"
-                  size="icon-sm"
-                  variant="ghost"
-                  disabled={pairDrawings.length === 0}
-                  onClick={handleClearDrawings}
-                  aria-label={t('studio.clear')}
-                >
-                  <Trash2 className="size-3.5" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="right">
-                {t('studio.clear')} ({pairDrawings.length})
-              </TooltipContent>
-            </Tooltip>
-          </nav>
-
-          {/* Center Synchronized Chart Stack */}
-          <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-background">
+          {onSelectTimeframe && (
             <div
-              ref={expandedStackRef}
-              className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto overflow-x-hidden p-2 [scrollbar-width:thin]"
+              className="inline-flex h-6 items-center gap-0.5 rounded-sm bg-muted/45 p-0.5"
+              role="group"
+              aria-label={t('market.timeframeAria')}
             >
-              <CandleChart
-                candles={visibleCandles}
-                overlays={visibleOverlays}
-                signals={visibleSignals}
-                orderLines={orderLines}
-                drawings={pairDrawings}
-                drawingMode={drawingMode}
-                candleStyle={candleStyle}
-                magnetSnap={magnetSnap}
-                volSmaValues={visibleVolSma}
-                onAddDrawing={handleAddDrawing}
-                onRemoveDrawing={handleRemoveDrawing}
-                onPanDelta={handlePanDelta}
-                onZoomDelta={handleZoomDelta}
-                onResetView={handleResetView}
-                activeIndex={hoverIndex}
-                onActiveIndexChange={setHoverIndex}
-                height={expandedCandleHeight}
-                defaultWheelZoomLocked={true}
-                compactHeader
-              />
-
-              {showRsi && (
-                <RsiPanel
-                  candles={visibleCandles}
-                  values={visibleRsi}
-                  period={RSI_PERIOD}
-                  activeIndex={hoverIndex}
-                  onActiveIndexChange={setHoverIndex}
-                  height={subPaneHeight}
-                  compactHeader
-                />
-              )}
-
-              {showMacd && (
-                <MacdPanel
-                  candles={visibleCandles}
-                  macdLine={visibleMacd.macdLine}
-                  signalLine={visibleMacd.signalLine}
-                  histogram={visibleMacd.histogram}
-                  activeIndex={hoverIndex}
-                  onActiveIndexChange={setHoverIndex}
-                  height={subPaneHeight}
-                  compactHeader
-                />
-              )}
-            </div>
-
-            {/* Bottom Expanded Scrubber Footer */}
-            <footer className="flex shrink-0 flex-wrap items-center justify-between gap-2.5 border-t border-border bg-card/65 px-3 py-1.5">
-              {zoomPresetsControl}
-
-              <div className="flex min-w-[180px] flex-1 items-center gap-2.5">
-                <span className="font-mono text-[10px] font-semibold uppercase tracking-[0.07em] text-muted-foreground whitespace-nowrap">
-                  {isEs ? 'Espectro' : 'Spectrum'}
-                </span>
-                <Slider
-                  min={0}
-                  max={Math.max(1, maxPanOffset)}
-                  step={1}
-                  disabled={maxPanOffset === 0}
-                  value={[maxPanOffset - clampedPan]}
-                  onValueChange={([sliderVal]) => {
-                    setPanOffset(Math.max(0, maxPanOffset - (sliderVal ?? 0)))
-                  }}
-                  aria-label={
-                    isEs ? 'Desplazar espectro de velas' : 'Scrub candle spectrum'
-                  }
-                  className="flex-1"
-                />
-                <Button
+              {INTERVAL_OPTIONS.map((tf) => (
+                <button
+                  key={tf}
                   type="button"
-                  variant="outline"
-                  size="xs"
-                  disabled={clampedPan === 0}
-                  onClick={() => setPanOffset(0)}
-                  className="shrink-0 whitespace-nowrap"
+                  aria-pressed={timeframe === tf}
+                  onClick={() => onSelectTimeframe(tf)}
+                  className={cn(
+                    'inline-flex h-5 items-center justify-center rounded-[4px] px-1.5 font-mono text-[10px] font-semibold transition-all duration-150 cursor-pointer',
+                    timeframe === tf
+                      ? 'bg-card text-primary'
+                      : 'text-muted-foreground hover:text-foreground',
+                  )}
                 >
-                  <RotateCcw className="size-3" />
-                  <span>{isEs ? 'En Vivo' : 'Live'}</span>
-                </Button>
-              </div>
+                  {tf}
+                </button>
+              ))}
+            </div>
+          )}
 
-              <span className="hidden font-mono text-[10.5px] text-muted-foreground tabular-nums md:inline">
-                {visibleCandles.length}/{navigableTotal} bars · +{warmupBars} warm-up
-              </span>
-            </footer>
-          </div>
-
-          {/* Collapsible Right Quantitative Drawer */}
-          {showRightPanel && (
-            <StudioSidebar
-              candles={candles}
-              pair={pair}
-              timeframe={timeframe}
-              params={params}
-              signals={navigableSignals}
-              orderSide={orderSide}
-              onOrderSideChange={setOrderSide}
-              strategy={strategy}
-              onSaveStrategy={onSaveStrategy}
-              onChangeParams={onChangeParams}
-              onApplyPreset={handleApplyPreset}
-              onJumpToBar={handleJumpToBar}
-              botSnapshot={botSnapshot}
-              orderSizeUsd={orderSizeUsd}
-              onOrderSizeUsdChange={setOrderSizeUsd}
-              onSubmitOrder={(s) => void handleExecuteQuickDemoOrder(s)}
-              submittingOrder={submittingOrder}
-              orderFeedback={orderFeedback}
-              atr14={latestAtr14}
-              lastVwap={latestVwap}
-            />
+          {candleStyle === 'heikin-ashi' && (
+            <Badge variant="violet" className="h-5 px-1.5 text-[9.5px]">
+              HA
+            </Badge>
           )}
         </div>
-      </div>
-    )
-  }
 
-  return (
-    <div className="flex min-w-0 flex-col gap-2.5">
-      {/* Interactive toolbar */}
-      <div
-        className={cn(
-          'flex min-w-0 flex-col gap-2 border-b border-border pb-2.5',
-          compact && 'gap-1.5 pb-2',
-        )}
-      >
-        <div className="flex min-w-0 max-w-full flex-nowrap items-center justify-between gap-2 overflow-x-auto [scrollbar-width:none]">
-          {/* SVG drawing tools */}
-          <div className="flex shrink-0 flex-nowrap items-center gap-1.5">
-            <div
-              className="inline-flex h-7 items-center gap-0.5 rounded-sm border border-border bg-secondary/65 p-0.5"
-              role="group"
-            >
-              {drawToolItems.map(({ id, label, title, Icon }) => {
-                const active = drawingMode === id
-                return (
-                  <Tooltip key={id}>
-                    <TooltipTrigger asChild>
-                      <button
-                        type="button"
-                        onClick={() => setDrawingMode(id)}
-                        className={cn(
-                          'inline-flex h-[22px] items-center gap-1 whitespace-nowrap rounded-[4px] border px-2 font-mono text-[10.5px] font-medium transition-all duration-150 cursor-pointer',
-                          active
-                            ? 'border-border bg-card font-semibold text-primary shadow-[0_1px_2px_rgba(0,0,0,0.18)]'
-                            : 'border-transparent text-muted-foreground hover:text-foreground',
-                        )}
-                      >
-                        <Icon className="size-3" />
-                        <span>{label}</span>
-                      </button>
-                    </TooltipTrigger>
-                    <TooltipContent side="top">{title}</TooltipContent>
-                  </Tooltip>
-                )
-              })}
-            </div>
+        <div className="flex shrink-0 items-center gap-1.5">
+          <div className="hidden xl:flex">{candleStyleSelector}</div>
+          {zoomPresetsControl}
+          {addPaneMenu}
+          {indicatorMenu}
+          <ChartAlertsPopover
+            pair={pair}
+            livePrice={livePrice}
+            alerts={pairAlerts}
+            onAddAlert={handleAddAlert}
+            onToggleAlert={handleToggleAlert}
+            onRearmAlert={handleRearmAlert}
+            onRemoveAlert={handleRemoveAlert}
+            onJumpToAlert={handleJumpToAlert}
+          />
 
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  type="button"
-                  variant={magnetSnap ? 'secondary' : 'outline'}
-                  size="icon-xs"
-                  onClick={() => updatePref('magnetSnap', !magnetSnap)}
-                  aria-label={t('studio.magnet')}
-                  aria-pressed={magnetSnap}
-                  className={cn(magnetSnap && 'border-primary/45 text-primary')}
-                >
-                  <Magnet className="size-3.5" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="top">{t('studio.magnet')}</TooltipContent>
-            </Tooltip>
-
+          {onCalibratePreset && coinProfile && (
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
                   type="button"
                   variant="outline"
-                  size="icon-xs"
-                  onClick={handleUndoDrawing}
-                  disabled={pairDrawings.length === 0}
-                  aria-label={t('studio.undo')}
-                >
-                  <Undo2 className="size-3.5" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="top">{t('studio.undo')}</TooltipContent>
-            </Tooltip>
-
-            <Button
-              type="button"
-              variant="outline"
-              size="xs"
-              onClick={handleClearDrawings}
-              disabled={pairDrawings.length === 0}
-              className="font-mono text-[10.5px] tabular-nums"
-            >
-              <Trash2 className="size-3" />
-              <span className="whitespace-nowrap tabular-nums">
-                {t('studio.clear')} ({pairDrawings.length})
-              </span>
-            </Button>
-          </div>
-
-          {/* Right controls: candle style + indicators + zoom + expand */}
-          <div className="ml-auto flex shrink-0 flex-nowrap items-center gap-1.5">
-            {!compact && <div className="hidden xl:flex">{candleStyleSelector}</div>}
-            {!compact && indicatorMenu}
-            {zoomPresetsControl}
-
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  type="button"
-                  variant="default"
                   size="xs"
-                  onClick={() => setIsExpanded(true)}
-                  className="gap-1.5 font-mono"
+                  onClick={onCalibratePreset}
+                  className="h-6 gap-1 px-2"
                 >
-                  <Maximize2 className="size-3" />
-                  <span>{t('studio.expand')}</span>
+                  <Target className="size-3 text-primary" />
+                  <span className="hidden md:inline">
+                    {t('terminal.calibrate', {
+                      coin: pair.replace('/USDT', ''),
+                    })}
+                  </span>
                 </Button>
               </TooltipTrigger>
-              <TooltipContent side="top">
-                {isEs
-                  ? 'Abrir Workstation a pantalla completa (tecla F)'
-                  : 'Open Fullscreen Chart Studio (press F)'}
+              <TooltipContent side="bottom">
+                {t('terminal.calibrateTitle', { preset: calibrateLabel })}
               </TooltipContent>
             </Tooltip>
-          </div>
-        </div>
+          )}
 
-        {/* Row 2: Order Lines + Quick Overlay Shortcuts */}
-        {!compact && (
-          <div className="flex flex-nowrap items-center justify-between gap-2.5 overflow-x-auto border-t border-dashed border-border/80 pt-2 [scrollbar-width:none]">
-            <div className="flex shrink-0 flex-nowrap items-center gap-1.5">
-              <span className="mr-0.5 font-mono text-[10.5px] font-semibold uppercase tracking-[0.07em] text-muted-foreground whitespace-nowrap">
-                {isEs ? 'Órdenes' : 'Orders'}
-              </span>
+          <Tooltip>
+            <TooltipTrigger asChild>
               <Button
                 type="button"
-                variant={showOrderLines ? 'default' : 'outline'}
-                size="xs"
-                onClick={() => updatePref('showOrderLines', !showOrderLines)}
+                size="icon-xs"
+                variant="outline"
+                onClick={handleResetView}
+                aria-label={t('studio.resetView')}
+                className="size-6"
               >
-                <Layers className="size-3" />
-                <span>{isEs ? 'Líneas TP/SL' : 'TP/SL Lines'}</span>
+                <RotateCcw className="size-3" />
               </Button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">{t('studio.resetView')}</TooltipContent>
+          </Tooltip>
 
-              <div
-                className={cn(
-                  'inline-flex h-7 items-center gap-0.5 rounded-sm border border-border bg-secondary/65 p-0.5',
-                  !showOrderLines && 'opacity-45',
-                )}
-                role="group"
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                size="icon-xs"
+                variant={showRightPanel ? 'default' : 'outline'}
+                onClick={handleToggleRightPanel}
+                aria-label={t('studio.togglePanel')}
+                aria-pressed={showRightPanel}
+                className="size-6"
               >
-                <button
-                  type="button"
-                  className={cn(
-                    'inline-flex h-[22px] items-center justify-center rounded-[4px] border px-2 font-mono text-[10.5px] font-semibold transition-all duration-150 cursor-pointer disabled:cursor-not-allowed',
-                    orderSide === 'buy'
-                      ? 'border-[var(--positive)]/50 bg-[var(--positive-soft)] text-[var(--positive)]'
-                      : 'border-transparent text-muted-foreground hover:text-foreground',
-                  )}
-                  onClick={() => setOrderSide('buy')}
-                  disabled={!showOrderLines}
-                >
-                  LONG
-                </button>
-                <button
-                  type="button"
-                  className={cn(
-                    'inline-flex h-[22px] items-center justify-center rounded-[4px] border px-2 font-mono text-[10.5px] font-semibold transition-all duration-150 cursor-pointer disabled:cursor-not-allowed',
-                    orderSide === 'sell'
-                      ? 'border-[var(--negative)]/50 bg-[var(--negative-soft)] text-[var(--negative)]'
-                      : 'border-transparent text-muted-foreground hover:text-foreground',
-                  )}
-                  onClick={() => setOrderSide('sell')}
-                  disabled={!showOrderLines}
-                >
-                  SHORT
-                </button>
-              </div>
+                <PanelRight className="size-3" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">{t('studio.togglePanel')}</TooltipContent>
+          </Tooltip>
+
+          {onNavigate && (
+            <>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="xs"
+                    onClick={() => {
+                      setIsExpanded(false)
+                      onNavigate('predictions')
+                    }}
+                    aria-label={t('nav.predictions')}
+                    className="h-6 gap-1 px-2"
+                  >
+                    <Target className="size-3" />
+                    <span className="hidden xl:inline">{t('nav.predictions')}</span>
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">{t('nav.predictions')}</TooltipContent>
+              </Tooltip>
 
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Button
                     type="button"
-                    variant="secondary"
+                    variant="default"
                     size="xs"
-                    className="justify-center font-mono text-[11px] whitespace-nowrap"
-                    onClick={() => void handleExecuteQuickDemoOrder()}
-                    disabled={submittingOrder}
+                    onClick={() => {
+                      setIsExpanded(false)
+                      onNavigate('bot-run')
+                    }}
+                    aria-label={t('terminal.runBot')}
+                    className="h-6 gap-1 px-2"
                   >
-                    <Zap className="size-3 text-primary" />
-                    <span>
-                      {submittingOrder
-                        ? '...'
-                        : `${orderSide === 'buy' ? 'LONG' : 'SHORT'} $${orderSizeUsd}`}
-                    </span>
+                    <Bot className="size-3" />
+                    <span className="hidden lg:inline">{t('terminal.runBot')}</span>
                   </Button>
                 </TooltipTrigger>
-                <TooltipContent side="top">
-                  {isEs
-                    ? 'Enviar orden de prueba inmediata al adaptador Binance Testnet / Demo Vault'
-                    : 'Send instant test order to Binance Testnet / Demo Vault adapter'}
-                </TooltipContent>
+                <TooltipContent side="bottom">{t('terminal.runBot')}</TooltipContent>
               </Tooltip>
-            </div>
+            </>
+          )}
 
-            <div className="ml-auto flex shrink-0 flex-nowrap items-center gap-1.5">
-              <div className="flex xl:hidden">{candleStyleSelector}</div>
+          <Tooltip>
+            <TooltipTrigger asChild>
               <Button
                 type="button"
-                variant={showBollinger ? 'secondary' : 'outline'}
                 size="xs"
-                onClick={() => updatePref('showBollinger', !showBollinger)}
+                variant="outline"
+                onClick={() => setIsExpanded((v) => !v)}
+                aria-label={
+                  isExpanded ? t('studio.collapseHint') : t('studio.expandHint')
+                }
+                className="h-6 gap-1 px-2 font-mono"
               >
-                BB (20,2)
+                {isExpanded ? (
+                  <>
+                    <Minimize2 className="size-3" />
+                    <span className="hidden sm:inline">{t('studio.collapse')}</span>
+                  </>
+                ) : (
+                  <>
+                    <Maximize2 className="size-3" />
+                    <span className="hidden sm:inline">{t('studio.expand')}</span>
+                  </>
+                )}
               </Button>
-              <Button
-                type="button"
-                variant={showEma50 ? 'secondary' : 'outline'}
-                size="xs"
-                onClick={() => updatePref('showEma50', !showEma50)}
-              >
-                EMA 50
-              </Button>
-              <Button
-                type="button"
-                variant={showVwap ? 'secondary' : 'outline'}
-                size="xs"
-                onClick={() => updatePref('showVwap', !showVwap)}
-              >
-                VWAP
-              </Button>
-              <Button
-                type="button"
-                variant={showMacd ? 'secondary' : 'outline'}
-                size="xs"
-                onClick={() => updatePref('showMacd', !showMacd)}
-              >
-                MACD
-              </Button>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {!compact && orderFeedback && (
-        <div className="flex items-center gap-2 rounded-sm border border-primary/40 bg-primary/10 px-3 py-2 font-mono text-xs font-medium text-foreground">
-          <Zap className="size-3.5 shrink-0 text-primary" />
-          <span>{orderFeedback}</span>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">
+              {isExpanded ? t('studio.collapseHint') : t('studio.expandHint')}
+            </TooltipContent>
+          </Tooltip>
         </div>
-      )}
+      </header>
 
-      {/* Interactive candlestick chart */}
-      <CandleChart
-        candles={visibleCandles}
-        overlays={visibleOverlays}
-        signals={visibleSignals}
-        orderLines={compact ? [] : orderLines}
-        drawings={pairDrawings}
-        drawingMode={drawingMode}
-        candleStyle={candleStyle}
-        magnetSnap={magnetSnap}
-        volSmaValues={visibleVolSma}
-        onAddDrawing={handleAddDrawing}
-        onRemoveDrawing={handleRemoveDrawing}
-        onPanDelta={handlePanDelta}
-        onZoomDelta={handleZoomDelta}
-        onResetView={handleResetView}
-        activeIndex={hoverIndex}
-        onActiveIndexChange={setHoverIndex}
-        height={chartHeight}
-        defaultWheelZoomLocked={defaultWheelZoomLocked}
-      />
+      {/* Main Split Workspace */}
+      <div className="relative flex min-h-0 flex-1 overflow-hidden">
+        {/* Left Vertical Drawing Rail */}
+        <nav
+          aria-label={t('studio.drawingToolsAria')}
+          className={cn(
+            'flex shrink-0 flex-col items-center gap-1 bg-card/65 py-1.5',
+            isCompactDensity ? 'w-8' : 'w-10',
+          )}
+        >
+          {drawToolItems.map(({ id, label, title, Icon }) => {
+            const active = drawingMode === id
+            return (
+              <Tooltip key={id}>
+                <TooltipTrigger asChild>
+                  <Button
+                    type="button"
+                    size="icon-xs"
+                    variant={active ? 'default' : 'ghost'}
+                    onClick={() => handleSelectDrawingMode(id)}
+                    aria-label={label}
+                    aria-pressed={active}
+                    className="size-7"
+                  >
+                    <Icon className="size-3.5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="right">{title}</TooltipContent>
+              </Tooltip>
+            )
+          })}
 
-      {/* Historical spectrum scrubber */}
-      <div className="flex flex-wrap items-center justify-between gap-3 border-y border-border/80 py-2">
-        <div className="flex min-w-[200px] flex-1 items-center gap-3">
-          <span className="font-mono text-[10.5px] font-semibold uppercase tracking-[0.07em] text-muted-foreground whitespace-nowrap">
-            {isEs ? 'Espectro' : 'Spectrum'}
-          </span>
-          <Slider
-            min={0}
-            max={Math.max(1, maxPanOffset)}
-            step={1}
-            disabled={maxPanOffset === 0}
-            value={[maxPanOffset - clampedPan]}
-            onValueChange={([sliderVal]) => {
-              setPanOffset(Math.max(0, maxPanOffset - (sliderVal ?? 0)))
-            }}
-            aria-label={
-              isEs ? 'Desplazar espectro de velas' : 'Scrub candle spectrum'
-            }
-            className="flex-1"
+          <Separator className="my-0.5 w-6" />
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                size="icon-xs"
+                variant={magnetSnap ? 'secondary' : 'ghost'}
+                onClick={() => updatePref('magnetSnap', !magnetSnap)}
+                aria-label={t('studio.magnet')}
+                aria-pressed={magnetSnap}
+                className={cn('size-7', magnetSnap && 'text-primary')}
+              >
+                <Magnet className="size-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="right">{t('studio.magnet')}</TooltipContent>
+          </Tooltip>
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                size="icon-xs"
+                variant="ghost"
+                disabled={!canUndoDrawings}
+                onClick={handleUndoDrawing}
+                aria-label={t('studio.undo')}
+                className="size-7"
+              >
+                <Undo2 className="size-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="right">{t('studio.undo')}</TooltipContent>
+          </Tooltip>
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                size="icon-xs"
+                variant="ghost"
+                disabled={!canRedoDrawings}
+                onClick={handleRedoDrawing}
+                aria-label={t('studio.redo')}
+                className="size-7"
+              >
+                <Redo2 className="size-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="right">{t('studio.redo')}</TooltipContent>
+          </Tooltip>
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                size="icon-xs"
+                variant="ghost"
+                disabled={scopedDrawings.length === 0}
+                onClick={() => setClearDialogOpen(true)}
+                aria-label={`${t('studio.clear')} (${scopedDrawings.length})`}
+                className="size-7"
+              >
+                <Trash2 className="size-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="right">
+              {t('studio.clear')} ({scopedDrawings.length})
+            </TooltipContent>
+          </Tooltip>
+        </nav>
+
+        <AlertDialog open={clearDialogOpen} onOpenChange={setClearDialogOpen}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>{t('studio.clearConfirmTitle')}</AlertDialogTitle>
+              <AlertDialogDescription>
+                {t('studio.clearConfirmDesc', {
+                  count: scopedDrawings.length,
+                  pair,
+                  tf: timeframe,
+                })}
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>{t('settings.cancel')}</AlertDialogCancel>
+              <AlertDialogAction onClick={handleConfirmClearDrawings}>
+                {t('studio.clearConfirmYes')}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+
+        {/* Center Synchronized Chart Stack — seamless full-height surface */}
+        <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-card">
+          {firedBannerAlerts.length > 0 && (
+            <div
+              role="status"
+              aria-live="assertive"
+              className="pointer-events-auto absolute top-2 right-2 z-20 flex max-w-xs flex-col gap-1"
+            >
+              {firedBannerAlerts.map((alert) => (
+                <div
+                  key={`fired-${alert.id}`}
+                  className="flex items-center gap-2 rounded-sm bg-popover px-2.5 py-1.5 font-mono text-[10.5px] text-popover-foreground tabular-nums"
+                >
+                  <Bell className="size-3.5 shrink-0 text-[var(--chart-alert)]" />
+                  <span className="min-w-0 flex-1 truncate">
+                    {t('studio.alertFiredBanner', {
+                      pair: alert.pair,
+                      dir:
+                        alert.direction === 'above'
+                          ? t('studio.alertAbove')
+                          : t('studio.alertBelow'),
+                      price: formatPrice(alert.price),
+                    })}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => handleRearmAlert(alert.id)}
+                    className="shrink-0 cursor-pointer rounded px-1.5 py-0.5 text-[10px] font-semibold text-primary hover:bg-primary/15"
+                  >
+                    {t('studio.alertRearm')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleDismissFiredAlert(alert.id)}
+                    aria-label={t('studio.alertDismiss')}
+                    className="inline-flex size-5 shrink-0 cursor-pointer items-center justify-center rounded text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+                  >
+                    <X className="size-3" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div
+            ref={plotStackRef}
+            className={cn(
+              'flex min-h-0 flex-1 flex-col gap-1 overflow-hidden px-1 pt-1',
+              isExpanded ? 'pb-1' : 'pb-[var(--flare-dock-clearance)]',
+            )}
+          >
+            <CandleChart
+              candles={visibleCandles}
+              overscanLeftCandles={overscanLeftCandles}
+              overscanRightCandles={overscanRightCandles}
+              overlays={visibleOverlays}
+              overscanLeftOverlays={overscanLeftOverlays}
+              overscanRightOverlays={overscanRightOverlays}
+              signals={visibleSignals}
+              orderLines={orderLines}
+              alerts={pairAlerts}
+              highlightedAlertId={highlightedAlertId}
+              drawings={scopedDrawings}
+              drawingMode={drawingMode}
+              candleStyle={candleStyle}
+              magnetSnap={magnetSnap}
+              volSmaValues={visibleVolSma}
+              overscanLeftVolSma={overscanLeftVolSma}
+              overscanRightVolSma={overscanRightVolSma}
+              onAddDrawing={handleAddDrawing}
+              onUpdateDrawing={handleUpdateDrawing}
+              onRemoveDrawing={handleRemoveDrawing}
+              selectedDrawingId={selectedDrawingId}
+              onSelectDrawing={setSelectedDrawingId}
+              onCreateAlertAtPrice={handleCreateAlertAtPrice}
+              onPrefillOrderAtPrice={handlePrefillOrderAtPrice}
+              viewStart={viewStart}
+              canPanLeft={canPanLeft}
+              canPanRight={canPanRight}
+              onPanDelta={handlePanDelta}
+              onZoomDelta={handleZoomDelta}
+              onResetView={handleResetView}
+              canJumpLive={!isFollowingLive}
+              onJumpLive={handleJumpLive}
+              livePrice={livePrice}
+              livePriceIsUp={livePriceIsUp}
+              pair={pair}
+              interval={timeframe}
+              streamStatus={streamStatus}
+              crosshairChannel={crosshairChannel}
+              panTransformChannel={panTransformChannel}
+              wheelTargetRef={plotStackRef}
+              fillHeight
+              defaultWheelZoomLocked={defaultWheelZoomLocked || isExpanded}
+              reducedMotion={reducedMotion}
+              compactHeader
+            />
+
+            {visiblePanes.map((pane) => {
+              const otherPanesHeight = visiblePanes
+                .filter((p) => p.id !== pane.id)
+                .reduce(
+                  (sum, p) =>
+                    sum + (p.collapsed ? COLLAPSED_PANE_HEIGHT : p.height),
+                  0,
+                )
+              const clampedPaneHeight = clampPaneHeight(
+                pane.height,
+                plotStackSize.height,
+                otherPanesHeight,
+                visiblePanes.length,
+              )
+              const maxAllowed = clampPaneHeight(
+                9999,
+                plotStackSize.height,
+                otherPanesHeight,
+                visiblePanes.length,
+              )
+              const svgHeight = resolvePaneSvgHeight(clampedPaneHeight)
+              const paneLabel = pane.kind === 'rsi' ? 'RSI' : 'MACD'
+
+              return (
+                <div key={pane.id} className="flex shrink-0 flex-col">
+                  <PaneResizeHandle
+                    paneLabel={paneLabel}
+                    currentHeight={clampedPaneHeight}
+                    minHeight={MIN_PANE_HEIGHT}
+                    maxHeight={maxAllowed}
+                    disabled={pane.collapsed}
+                    ariaLabel={t('studio.paneResizeAria', { pane: paneLabel })}
+                    title={t('studio.paneResizeHint')}
+                    onResize={(nextH) => handleResizePane(pane.kind, nextH)}
+                    onReset={() => handleResetPaneHeight(pane.kind)}
+                  />
+                  {pane.kind === 'rsi' ? (
+                    <RsiPanel
+                      candles={visibleCandles}
+                      values={visibleRsi}
+                      overscanLeftValues={overscanLeftRsi}
+                      overscanRightValues={overscanRightRsi}
+                      period={pane.settings.period}
+                      overbought={pane.settings.overbought}
+                      oversold={pane.settings.oversold}
+                      crosshairChannel={crosshairChannel}
+                      panTransformChannel={panTransformChannel}
+                      height={svgHeight}
+                      compactHeader
+                      collapsed={pane.collapsed}
+                      onToggleCollapse={() => handleTogglePaneCollapse('rsi')}
+                      onClose={() => handleSetPaneVisible('rsi', false)}
+                      onChangeSettings={handleUpdateRsiSettings}
+                      onResetSettings={() =>
+                        handleUpdateRsiSettings(DEFAULT_RSI_SETTINGS)
+                      }
+                    />
+                  ) : (
+                    <MacdPanel
+                      candles={visibleCandles}
+                      macdLine={visibleMacd.macdLine}
+                      signalLine={visibleMacd.signalLine}
+                      histogram={visibleMacd.histogram}
+                      overscanLeft={overscanLeftMacd}
+                      overscanRight={overscanRightMacd}
+                      fastPeriod={pane.settings.fastPeriod}
+                      slowPeriod={pane.settings.slowPeriod}
+                      signalPeriod={pane.settings.signalPeriod}
+                      crosshairChannel={crosshairChannel}
+                      panTransformChannel={panTransformChannel}
+                      height={svgHeight}
+                      compactHeader
+                      collapsed={pane.collapsed}
+                      onToggleCollapse={() => handleTogglePaneCollapse('macd')}
+                      onClose={() => handleSetPaneVisible('macd', false)}
+                      onChangeSettings={handleUpdateMacdSettings}
+                      onResetSettings={() =>
+                        handleUpdateMacdSettings(DEFAULT_MACD_SETTINGS)
+                      }
+                    />
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </div>
+
+        {/* Collapsible Right Quantitative Drawer (docked on lg+, overlay drawer on < lg) */}
+        {showRightPanel && !isWideViewport && (
+          <div
+            className="absolute inset-0 z-20 bg-foreground/15"
+            aria-hidden="true"
+            onClick={() => setNarrowPanelOpen(false)}
           />
-          <Button
-            type="button"
-            variant="outline"
-            size="xs"
-            disabled={clampedPan === 0}
-            onClick={() => setPanOffset(0)}
-            className="shrink-0 whitespace-nowrap"
-          >
-            <RotateCcw className="size-3" />
-            <span>{isEs ? 'Ir a Vela Actual' : 'Jump to Live'}</span>
-          </Button>
-        </div>
-
-        {!compact && (
-          <Badge
-            variant="secondary"
-            className="shrink-0 font-mono text-[10.5px] lowercase tracking-normal"
-            title={
-              isEs
-                ? `Mostrando ${visibleCandles.length} de ${navigableTotal} velas navegables (+${warmupBars} velas de pre-calentamiento)`
-                : `Showing ${visibleCandles.length} of ${navigableTotal} navigable bars (+${warmupBars} warm-up bars)`
+        )}
+        {showRightPanel && (
+          <StudioSidebar
+            candles={candles}
+            pair={pair}
+            timeframe={timeframe}
+            params={params}
+            signals={navigableSignals}
+            orderSide={orderSide}
+            onOrderSideChange={setOrderSide}
+            orderPrefill={orderPrefill}
+            onClearOrderPrefill={handleClearOrderPrefill}
+            strategy={strategy}
+            onSaveStrategy={onSaveStrategy}
+            onChangeParams={onChangeParams}
+            onApplyPreset={handleApplyPreset}
+            onJumpToBar={handleJumpToBar}
+            botSnapshot={botSnapshot}
+            orderSizeUsd={orderSizeUsd}
+            onOrderSizeUsdChange={setOrderSizeUsd}
+            onSubmitOrder={handleSidebarSubmitOrder}
+            submittingOrder={submittingOrder}
+            orderFeedback={orderFeedback}
+            atr14={latestAtr14}
+            lastVwap={latestVwap}
+            coinProfile={coinProfile}
+            onCalibratePreset={onCalibratePreset}
+            liveMetrics={liveMetrics}
+            className={
+              !isWideViewport
+                ? 'absolute inset-y-0 right-0 z-30 w-[320px] max-w-[88vw]'
+                : undefined
             }
-          >
-            {isEs
-              ? `${visibleCandles.length}/${navigableTotal} velas · +${warmupBars} warm-up`
-              : `${visibleCandles.length}/${navigableTotal} bars · +${warmupBars} warm-up`}
-          </Badge>
+          />
         )}
       </div>
-
-      {!compact && (
-        <div className="flex flex-col gap-3">
-          {showRsi && (
-            <RsiPanel
-              candles={visibleCandles}
-              values={visibleRsi}
-              period={RSI_PERIOD}
-              activeIndex={hoverIndex}
-              onActiveIndexChange={setHoverIndex}
-            />
-          )}
-
-          {showMacd && (
-            <MacdPanel
-              candles={visibleCandles}
-              macdLine={visibleMacd.macdLine}
-              signalLine={visibleMacd.signalLine}
-              histogram={visibleMacd.histogram}
-              activeIndex={hoverIndex}
-              onActiveIndexChange={setHoverIndex}
-            />
-          )}
-
-          <div className="flex flex-col gap-2">
-            <h3 className="font-display text-xs font-semibold uppercase tracking-[0.06em] text-foreground">
-              {t('market.signals', { count: navigableSignals.length })}
-            </h3>
-            <SignalsTable signals={navigableSignals} params={params} />
-          </div>
-        </div>
-      )}
     </div>
   )
 }
