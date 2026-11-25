@@ -656,7 +656,7 @@ describe('PredictionWindowCollector (Ticket 04)', () => {
       expect(pollCount).toBe(2)
 
       // Injected store remains open and usable after collector.stop()
-      expect(await store.getSchemaVersion()).toBe(5)
+      expect(await store.getSchemaVersion()).toBe(6)
     } finally {
       clob.close()
       await store.close()

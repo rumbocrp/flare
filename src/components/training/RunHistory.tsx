@@ -85,22 +85,24 @@ function RunHistoryInner({
       className="rounded-md bg-card"
     >
       <div className="flex items-center justify-between gap-2 px-4 py-3">
-        <button
-          type="button"
-          onClick={onToggleCollapse}
-          aria-expanded={!collapsed}
-          className="flex items-center gap-1.5 text-left text-sm font-semibold text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-sm cursor-pointer"
-        >
-          {collapsed ? (
-            <ChevronRight className="size-4 text-muted-foreground" />
-          ) : (
-            <ChevronDown className="size-4 text-muted-foreground" />
-          )}
-          <span>{t('training.historyTitle')}</span>
-          <span className="font-mono text-xs font-normal text-[var(--text-subtle)] tabular-nums">
-            ({runs.length})
-          </span>
-        </button>
+        <h2 className="text-sm font-semibold text-foreground">
+          <button
+            type="button"
+            onClick={onToggleCollapse}
+            aria-expanded={!collapsed}
+            className="flex items-center gap-1.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-sm cursor-pointer"
+          >
+            {collapsed ? (
+              <ChevronRight className="size-4 text-muted-foreground" />
+            ) : (
+              <ChevronDown className="size-4 text-muted-foreground" />
+            )}
+            <span>{t('training.historyTitle')}</span>
+            <span className="font-mono text-xs font-normal text-[var(--text-subtle)] tabular-nums">
+              ({runs.length})
+            </span>
+          </button>
+        </h2>
 
         <Button
           type="button"

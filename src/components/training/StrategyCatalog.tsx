@@ -188,19 +188,21 @@ function StrategyCatalogInner({
       {/* Desktop (xl+) collapsible sidebar catalog */}
       <div className="hidden rounded-md bg-card xl:flex xl:flex-col">
         <div className="flex items-center justify-between gap-2 px-3.5 py-3">
-          <button
-            type="button"
-            onClick={onToggleCollapse}
-            aria-expanded={!collapsed}
-            className="flex items-center gap-1.5 text-left text-xs font-semibold text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-sm cursor-pointer"
-          >
-            {collapsed ? (
-              <ChevronRight className="size-3.5 text-muted-foreground" />
-            ) : (
-              <ChevronDown className="size-3.5 text-muted-foreground" />
-            )}
-            <span>{t('training.catalogTitle')}</span>
-          </button>
+          <h2 className="text-xs font-semibold text-foreground">
+            <button
+              type="button"
+              onClick={onToggleCollapse}
+              aria-expanded={!collapsed}
+              className="flex items-center gap-1.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-sm cursor-pointer"
+            >
+              {collapsed ? (
+                <ChevronRight className="size-3.5 text-muted-foreground" />
+              ) : (
+                <ChevronDown className="size-3.5 text-muted-foreground" />
+              )}
+              <span>{t('training.catalogTitle')}</span>
+            </button>
+          </h2>
           <span className="font-mono text-[11px] text-[var(--text-subtle)] tabular-nums">
             {filtered.length}/{catalog.length}
           </span>

@@ -30,6 +30,10 @@ import { POSTGRES_MIGRATIONS } from './postgresMigrations'
 import type {
   AuditEventRecord,
   CollectedWindowRecord,
+  ExchangePositionMode,
+  ExchangePositionQueryOptions,
+  ExchangePositionRecord,
+  ExchangePositionStatus,
   OrderQueryOptions,
   PersistedTenantEnvelope,
   PredictionStrategyLane,
@@ -1325,6 +1329,122 @@ export class PostgresStateStore implements StateStore {
       [tenantId],
     )
     return res.rows.map(mapPgStrategyState)
+  }
+
+  async upsertExchangePosition(position: ExchangePositionRecord): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO exchange_positions (
+        id, tenant_id, mode, preset_id, pair, side, status,
+        entry_order_id, entry_venue_order_id, exit_order_id, exit_venue_order_id,
+        entry_qty, exit_qty, entry_avg_price, exit_avg_price,
+        entry_fee_usd, exit_fee_usd, stop_price, target_price,
+        protection_order_id, realized_pnl_usd, r_multiple, exit_reason,
+        opened_at, closed_at
+      ) VALUES (
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25
+      )
+      ON CONFLICT(id) DO UPDATE SET
+        status = EXCLUDED.status,
+        exit_order_id = COALESCE(EXCLUDED.exit_order_id, exchange_positions.exit_order_id),
+        exit_venue_order_id = COALESCE(EXCLUDED.exit_venue_order_id, exchange_positions.exit_venue_order_id),
+        exit_qty = COALESCE(EXCLUDED.exit_qty, exchange_positions.exit_qty),
+        exit_avg_price = COALESCE(EXCLUDED.exit_avg_price, exchange_positions.exit_avg_price),
+        exit_fee_usd = EXCLUDED.exit_fee_usd,
+        stop_price = COALESCE(EXCLUDED.stop_price, exchange_positions.stop_price),
+        target_price = COALESCE(EXCLUDED.target_price, exchange_positions.target_price),
+        protection_order_id = COALESCE(EXCLUDED.protection_order_id, exchange_positions.protection_order_id),
+        realized_pnl_usd = COALESCE(EXCLUDED.realized_pnl_usd, exchange_positions.realized_pnl_usd),
+        r_multiple = COALESCE(EXCLUDED.r_multiple, exchange_positions.r_multiple),
+        exit_reason = COALESCE(EXCLUDED.exit_reason, exchange_positions.exit_reason),
+        closed_at = COALESCE(EXCLUDED.closed_at, exchange_positions.closed_at)`,
+      [
+        position.id,
+        position.tenantId,
+        position.mode,
+        position.presetId,
+        position.pair,
+        position.side,
+        position.status,
+        position.entryOrderId,
+        position.entryVenueOrderId,
+        position.exitOrderId,
+        position.exitVenueOrderId,
+        position.entryQty,
+        position.exitQty,
+        position.entryAvgPrice,
+        position.exitAvgPrice,
+        position.entryFeeUsd,
+        position.exitFeeUsd,
+        position.stopPrice,
+        position.targetPrice,
+        position.protectionOrderId,
+        position.realizedPnlUsd,
+        position.rMultiple,
+        position.exitReason,
+        position.openedAt,
+        position.closedAt,
+      ],
+    )
+  }
+
+  async queryExchangePositions(
+    tenantId: string,
+    options: ExchangePositionQueryOptions = {},
+  ): Promise<ExchangePositionRecord[]> {
+    const clauses: string[] = ['tenant_id = $1']
+    const params: unknown[] = [tenantId]
+    const pushParam = (val: unknown): string => {
+      params.push(val)
+      return `$${params.length}`
+    }
+    if (options.mode) clauses.push(`mode = ${pushParam(options.mode)}`)
+    if (options.presetId) clauses.push(`preset_id = ${pushParam(options.presetId)}`)
+    if (options.pair) clauses.push(`pair = ${pushParam(options.pair)}`)
+    if (options.status) clauses.push(`status = ${pushParam(options.status)}`)
+    const safeLimit = Math.max(
+      1,
+      Math.min(1_000, Math.round(options.limit ?? 200)),
+    )
+    const limitParam = pushParam(safeLimit)
+    const res = await this.pool.query(
+      `SELECT * FROM exchange_positions
+       WHERE ${clauses.join(' AND ')}
+       ORDER BY COALESCE(closed_at, opened_at) DESC, id DESC
+       LIMIT ${limitParam}`,
+      params,
+    )
+    return res.rows.map((row) => ({
+      id: String(row.id),
+      tenantId: String(row.tenant_id),
+      mode: String(row.mode) as ExchangePositionMode,
+      presetId: row.preset_id === null || row.preset_id === undefined ? null : String(row.preset_id),
+      pair: String(row.pair),
+      side: String(row.side) === 'SHORT' ? 'SHORT' : 'LONG',
+      status: String(row.status) as ExchangePositionStatus,
+      entryOrderId: String(row.entry_order_id),
+      entryVenueOrderId: row.entry_venue_order_id == null ? null : String(row.entry_venue_order_id),
+      exitOrderId: row.exit_order_id == null ? null : String(row.exit_order_id),
+      exitVenueOrderId: row.exit_venue_order_id == null ? null : String(row.exit_venue_order_id),
+      entryQty: Number(row.entry_qty),
+      exitQty: row.exit_qty == null ? null : Number(row.exit_qty),
+      entryAvgPrice: Number(row.entry_avg_price),
+      exitAvgPrice: row.exit_avg_price == null ? null : Number(row.exit_avg_price),
+      entryFeeUsd: Number(row.entry_fee_usd ?? 0),
+      exitFeeUsd: Number(row.exit_fee_usd ?? 0),
+      stopPrice: row.stop_price == null ? null : Number(row.stop_price),
+      targetPrice: row.target_price == null ? null : Number(row.target_price),
+      protectionOrderId: row.protection_order_id == null ? null : String(row.protection_order_id),
+      realizedPnlUsd: row.realized_pnl_usd == null ? null : Number(row.realized_pnl_usd),
+      rMultiple: row.r_multiple == null ? null : Number(row.r_multiple),
+      exitReason: row.exit_reason == null ? null : String(row.exit_reason),
+      openedAt: row.opened_at instanceof Date ? row.opened_at.toISOString() : String(row.opened_at),
+      closedAt:
+        row.closed_at == null
+          ? null
+          : row.closed_at instanceof Date
+            ? row.closed_at.toISOString()
+            : String(row.closed_at),
+    }))
   }
 
   async pruneRetention(

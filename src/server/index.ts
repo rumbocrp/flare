@@ -5,6 +5,7 @@ import {
   handleBotApiRequest,
   shutdownRuntime,
 } from './botRuntime'
+import { tryServeStaticAsset } from './staticFiles'
 
 const PORT = Number(process.env.PORT ?? 3001)
 const HOST = process.env.HOST?.trim() || '127.0.0.1'
@@ -16,13 +17,17 @@ const server = http.createServer(
     const cors = resolveCorsHeaders(req)
     try {
       const handled = await handleBotApiRequest(req, res)
-      if (!handled) {
-        res.writeHead(404, {
-          'Content-Type': 'application/json; charset=utf-8',
-          ...cors.headers,
-        })
-        res.end(JSON.stringify({ error: 'Route not found' }))
+      if (handled) return
+
+      if (tryServeStaticAsset(req, res)) {
+        return
       }
+
+      res.writeHead(404, {
+        'Content-Type': 'application/json; charset=utf-8',
+        ...cors.headers,
+      })
+      res.end(JSON.stringify({ error: 'Route not found' }))
     } catch (error) {
       console.error('[FLARE Backend] Unhandled HTTP request error:', error)
       if (!res.headersSent) {

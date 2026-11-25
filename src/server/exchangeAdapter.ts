@@ -1,5 +1,19 @@
 import crypto from 'node:crypto'
 import { availablePairs } from '../strategy'
+import { dispatchRuntimeAlert } from './alertDispatcher'
+import {
+  cancelBinanceProtectiveExit,
+  computeClosedExchangePositionMetrics,
+  estimateFeeUsd,
+  fetchBinanceSymbolFilters,
+  getBinanceLiveArmStatus,
+  placeBinanceProtectiveExit,
+  reconcileOpenBinancePositions,
+  resolveBinanceVenueCredentials,
+  validateAndQuantizeBinanceOrder,
+  type BinanceSymbolFilters,
+  type VenueReconciliationReport,
+} from './binanceLiveProtection'
 import { fetchOptimizedCandles } from './candleCache'
 import {
   buildInitialFundingEntry,
@@ -11,8 +25,12 @@ import {
   type LedgerVerificationReport,
 } from './ledger/doubleEntryLedger'
 import { getStateStore } from './store'
+import type { ExchangePositionRecord } from './store/types'
 
-export type ExchangeAdapterMode = 'binance-testnet' | 'paper'
+export type ExchangeAdapterMode =
+  | 'binance-testnet'
+  | 'binance-live'
+  | 'paper'
 export type ExchangeOrderVenue =
   | ExchangeAdapterMode
   | 'demo-vault'
@@ -75,6 +93,11 @@ export type BotOwnedTestnetPosition = {
   entryTime: number
   orderId: string
   venueOrderId?: string
+  positionId?: string
+  presetId?: string | null
+  stopPrice?: number | null
+  targetPrice?: number | null
+  protectionOrderId?: string | null
 }
 
 export type PersistedExchangeState = {
@@ -98,6 +121,9 @@ export type PersistedExchangeState = {
 export type ExchangeStatusSnapshot = {
   mode: ExchangeAdapterMode
   testnetConfigured: boolean
+  liveArmed?: boolean
+  liveKeysPresent?: boolean
+  protectiveExitsEnabled?: boolean
   paperFunded: boolean
   autoMirrorBotOrders: boolean
   killSwitchActive: boolean
@@ -115,7 +141,7 @@ export type ExchangeStatusSnapshot = {
 export type ExchangeAccountResponse =
   | {
       connected: true
-      mode: 'binance-testnet'
+      mode: 'binance-testnet' | 'binance-live'
       accountType: string
       canTrade: boolean
       canWithdraw: boolean
@@ -129,7 +155,7 @@ export type ExchangeAccountResponse =
       connected: false
       mode: ExchangeAdapterMode
       reason: string
-      requiredEnv: readonly ['BINANCE_TESTNET_KEY', 'BINANCE_TESTNET_SECRET']
+      requiredEnv: readonly string[]
       paperFunded: boolean
       paperBalances: ExchangeBalance[]
       updatedAt: string
@@ -143,7 +169,6 @@ export type TenantLedgerSnapshot = {
   entries: LedgerEntry[]
 }
 
-const TESTNET_BASE_URL = 'https://testnet.binance.vision'
 const DEFAULT_TENANT_ID = 'default'
 const REQUIRED_TESTNET_ENV = [
   'BINANCE_TESTNET_KEY',
@@ -308,11 +333,15 @@ export function getExchangeStatusSnapshot(
 ): ExchangeStatusSnapshot {
   const ctx = getTenantCtx(tenantId)
   syncDailyCounters(ctx)
-  const creds = getTestnetCredentials()
-  const mode: ExchangeAdapterMode = creds ? 'binance-testnet' : 'paper'
+  const venue = resolveBinanceVenueCredentials()
+  const armStatus = getBinanceLiveArmStatus()
+  const mode: ExchangeAdapterMode = venue ? venue.mode : 'paper'
   return {
     mode,
-    testnetConfigured: Boolean(creds),
+    testnetConfigured: Boolean(venue),
+    liveArmed: armStatus.liveArmed,
+    liveKeysPresent: armStatus.liveKeysPresent,
+    protectiveExitsEnabled: armStatus.protectiveExitsEnabled,
     paperFunded: ctx.paperFunded,
     autoMirrorBotOrders: ctx.autoMirrorBotOrders,
     killSwitchActive: ctx.killSwitchActive,
@@ -412,9 +441,9 @@ export async function fetchExchangeAccount(
   const ctx = getTenantCtx(tenantId)
   const nowIso = new Date().toISOString()
   const paperBalances = getPaperBalancesList(ctx)
-  const creds = getTestnetCredentials()
+  const venue = resolveBinanceVenueCredentials()
 
-  if (!creds) {
+  if (!venue) {
     return {
       connected: false,
       mode: 'paper',
@@ -427,15 +456,17 @@ export async function fetchExchangeAccount(
     }
   }
 
+  const venueLabel =
+    venue.mode === 'binance-live' ? 'Binance Spot Live' : 'Binance Spot Testnet'
   const fetchFn = options?.fetchImpl ?? globalThis.fetch
   try {
     const query = `timestamp=${Date.now()}&recvWindow=5000`
-    const signature = signQuery(query, creds.apiSecret)
+    const signature = signQuery(query, venue.apiSecret)
     const response = await fetchFn(
-      `${TESTNET_BASE_URL}/api/v3/account?${query}&signature=${signature}`,
+      `${venue.baseUrl}/api/v3/account?${query}&signature=${signature}`,
       {
         method: 'GET',
-        headers: { 'X-MBX-APIKEY': creds.apiKey },
+        headers: { 'X-MBX-APIKEY': venue.apiKey },
         signal: AbortSignal.timeout(TESTNET_TIMEOUT_MS),
       },
     )
@@ -452,8 +483,8 @@ export async function fetchExchangeAccount(
     if (!response.ok || !payload || !Array.isArray(payload.balances)) {
       return {
         connected: false,
-        mode: 'binance-testnet',
-        reason: `Binance Spot Testnet HTTP ${response.status}: ${payload?.msg ?? 'Failed to fetch account balances.'}`,
+        mode: venue.mode,
+        reason: `${venueLabel} HTTP ${response.status}: ${payload?.msg ?? 'Failed to fetch account balances.'}`,
         requiredEnv: REQUIRED_TESTNET_ENV,
         paperFunded: ctx.paperFunded,
         paperBalances,
@@ -508,7 +539,7 @@ export async function fetchExchangeAccount(
     ctx.updatedAt = nowIso
     return {
       connected: true,
-      mode: 'binance-testnet',
+      mode: venue.mode,
       accountType: payload.accountType ?? 'SPOT',
       canTrade: Boolean(payload.canTrade),
       canWithdraw: Boolean(payload.canWithdraw),
@@ -522,8 +553,8 @@ export async function fetchExchangeAccount(
   } catch (err) {
     return {
       connected: false,
-      mode: 'binance-testnet',
-      reason: `Binance Spot Testnet unreachable: ${err instanceof Error ? err.message : String(err)}`,
+      mode: venue.mode,
+      reason: `${venueLabel} unreachable: ${err instanceof Error ? err.message : String(err)}`,
       requiredEnv: REQUIRED_TESTNET_ENV,
       paperFunded: ctx.paperFunded,
       paperBalances,
@@ -814,6 +845,9 @@ export async function submitExchangeOrder(params: {
   exactQuantity?: number
   referencePrice?: number
   realizedPnlUsd?: number
+  stopPrice?: number | null
+  targetPrice?: number | null
+  exitReason?: string | null
   source?: 'manual' | 'bot-auto'
   presetId?: string | null
   clientOrderId?: string
@@ -860,6 +894,9 @@ async function executeOrderSubmission(
     exactQuantity?: number
     referencePrice?: number
     realizedPnlUsd?: number
+    stopPrice?: number | null
+    targetPrice?: number | null
+    exitReason?: string | null
     source?: 'manual' | 'bot-auto'
     presetId?: string | null
     clientOrderId?: string
@@ -909,8 +946,10 @@ async function executeOrderSubmission(
     }
   }
 
-  const creds = getTestnetCredentials()
-  const mode: ExchangeAdapterMode = creds ? 'binance-testnet' : 'paper'
+  const venue = resolveBinanceVenueCredentials()
+  const mode: ExchangeAdapterMode = venue ? venue.mode : 'paper'
+  const venueLabel =
+    mode === 'binance-live' ? 'Binance Spot Live' : 'Binance Spot Testnet'
   const source = params.source ?? 'manual'
   const resolvedPrice = await resolveExecutionPrice(
     params.pair,
@@ -977,9 +1016,79 @@ async function executeOrderSubmission(
   let finalStatus: ExchangeOrderStatus = 'FILLED'
   let executionNote = 'Paper order filled at live market price'
   let venueOrderId: string | undefined
+  let cachedFilters: BinanceSymbolFilters | null = null
 
-  if (creds) {
+  if (venue) {
     const fetchFn = params.fetchImpl ?? globalThis.fetch
+    // Fetch Binance symbol filters (`LOT_SIZE`, `PRICE_FILTER`, `NOTIONAL`)
+    // Live mainnet fails closed if symbol filters cannot be validated; Testnet enforces when available.
+    cachedFilters = await fetchBinanceSymbolFilters(
+      venue.baseUrl,
+      params.pair,
+      fetchFn,
+    )
+    if (venue.mode === 'binance-live' && !cachedFilters) {
+      return recordRejectedOrder(ctx, {
+        pair: params.pair,
+        side: params.side,
+        notionalUsd: finalNotionalUsd,
+        price: fillPrice,
+        quantity,
+        mode,
+        source,
+        presetId: params.presetId,
+        reason: `Rejected: unable to load Binance Live exchangeInfo filters for ${params.pair} (fail-closed).`,
+        clientOrderId: params.clientOrderId,
+      })
+    }
+
+    let quantizedQtyText: string | null = null
+    if (cachedFilters) {
+      const check = validateAndQuantizeBinanceOrder(cachedFilters, {
+        price: fillPrice,
+        quantity,
+      })
+      if (!check.ok) {
+        return recordRejectedOrder(ctx, {
+          pair: params.pair,
+          side: params.side,
+          notionalUsd: finalNotionalUsd,
+          price: fillPrice,
+          quantity,
+          mode,
+          source,
+          presetId: params.presetId,
+          reason: check.error,
+          clientOrderId: params.clientOrderId,
+        })
+      }
+      quantity = check.quantity
+      quantizedQtyText = check.quantityText
+      if (params.exactQuantity !== undefined) {
+        finalNotionalUsd = check.notionalUsd
+      }
+    }
+
+    // Cancel any open protective OCO / STOP_LOSS_LIMIT order before closing the position
+    if (
+      params.side === 'SELL' &&
+      source === 'bot-auto' &&
+      ctx.botOwnedPosition &&
+      ctx.botOwnedPosition.pair === params.pair &&
+      ctx.botOwnedPosition.protectionOrderId
+    ) {
+      await cancelBinanceProtectiveExit(
+        venue,
+        params.pair,
+        ctx.botOwnedPosition.protectionOrderId,
+        fetchFn,
+      )
+      ctx.botOwnedPosition = {
+        ...ctx.botOwnedPosition,
+        protectionOrderId: null,
+      }
+    }
+
     try {
       const symbol = params.pair.replace('/', '')
       const cidParam = params.clientOrderId
@@ -989,15 +1098,17 @@ async function executeOrderSubmission(
         typeof params.exactQuantity === 'number' &&
         Number.isFinite(params.exactQuantity) &&
         params.exactQuantity > 0
-          ? `quantity=${Number(params.exactQuantity.toFixed(6))}`
-          : `quoteOrderQty=${params.notionalUsd.toFixed(2)}`
+          ? `quantity=${quantizedQtyText ?? Number(params.exactQuantity.toFixed(6))}`
+          : venue.mode === 'binance-live' && quantizedQtyText
+            ? `quantity=${quantizedQtyText}`
+            : `quoteOrderQty=${params.notionalUsd.toFixed(2)}`
       const query = `symbol=${symbol}&side=${params.side}&type=MARKET&${qtyParam}${cidParam}&timestamp=${Date.now()}`
-      const signature = signQuery(query, creds.apiSecret)
+      const signature = signQuery(query, venue.apiSecret)
       const response = await fetchFn(
-        `${TESTNET_BASE_URL}/api/v3/order?${query}&signature=${signature}`,
+        `${venue.baseUrl}/api/v3/order?${query}&signature=${signature}`,
         {
           method: 'POST',
-          headers: { 'X-MBX-APIKEY': creds.apiKey },
+          headers: { 'X-MBX-APIKEY': venue.apiKey },
           signal: AbortSignal.timeout(TESTNET_TIMEOUT_MS),
         },
       )
@@ -1021,7 +1132,7 @@ async function executeOrderSubmission(
           mode,
           source,
           presetId: params.presetId,
-          reason: `Binance Testnet HTTP ${response.status}: ${payload?.msg ?? 'Order rejected by venue'}`,
+          reason: `${venueLabel} HTTP ${response.status}: ${payload?.msg ?? 'Order rejected by venue'}`,
           clientOrderId: params.clientOrderId,
         })
       }
@@ -1041,7 +1152,7 @@ async function executeOrderSubmission(
           mode,
           source,
           presetId: params.presetId,
-          reason: `Binance Testnet returned status: ${payload.status ?? 'UNKNOWN'}`,
+          reason: `${venueLabel} returned status: ${payload.status ?? 'UNKNOWN'}`,
           clientOrderId: params.clientOrderId,
         })
       }
@@ -1071,7 +1182,7 @@ async function executeOrderSubmission(
       if (payload.orderId !== undefined) {
         venueOrderId = String(payload.orderId)
       }
-      executionNote = `Reconciled on Binance Spot Testnet (#${venueOrderId ?? 'ack'})`
+      executionNote = `Reconciled on ${venueLabel} (#${venueOrderId ?? 'ack'})`
     } catch (err) {
       return recordRejectedOrder(ctx, {
         pair: params.pair,
@@ -1082,7 +1193,7 @@ async function executeOrderSubmission(
         mode,
         source,
         presetId: params.presetId,
-        reason: `Binance Testnet reconciliation failed: ${err instanceof Error ? err.message : String(err)}`,
+        reason: `${venueLabel} reconciliation failed: ${err instanceof Error ? err.message : String(err)}`,
         clientOrderId: params.clientOrderId,
       })
     }
@@ -1195,40 +1306,162 @@ async function executeOrderSubmission(
     reason: executionNote,
   }
 
-  // Track bot-owned testnet position quantity so close / kill-switch sells ONLY bot-owned qty
+  // Track bot-owned exchange position, place exchange-native protective exit (OCO/SL),
+  // and persist durable `exchange_positions` entry/exit rows for real PnL attribution.
   if (
-    creds &&
+    venue &&
     source === 'bot-auto' &&
     (finalStatus === 'FILLED' || finalStatus === 'PARTIALLY_FILLED') &&
     filledQty > 0
   ) {
+    const fetchFn = params.fetchImpl ?? globalThis.fetch
+    const fillFeeUsd = estimateFeeUsd(fee, feeAsset, params.pair, fillPrice)
+
     if (params.side === 'BUY') {
       const existing =
         ctx.botOwnedPosition && ctx.botOwnedPosition.pair === params.pair
           ? ctx.botOwnedPosition
           : null
       const nextQty = Number(((existing?.quantity ?? 0) + filledQty).toFixed(6))
+      const positionId = existing?.positionId ?? `POS-${recordedOrder.id}`
+
+      let protectionOrderId: string | null =
+        existing?.protectionOrderId ?? null
+      const stopPrice =
+        typeof params.stopPrice === 'number' &&
+        Number.isFinite(params.stopPrice) &&
+        params.stopPrice > 0
+          ? params.stopPrice
+          : null
+      const targetPrice =
+        typeof params.targetPrice === 'number' &&
+        Number.isFinite(params.targetPrice) &&
+        params.targetPrice > 0
+          ? params.targetPrice
+          : null
+
+      if (stopPrice !== null && getBinanceLiveArmStatus().protectiveExitsEnabled) {
+        const protRes = await placeBinanceProtectiveExit(venue, {
+          pair: params.pair,
+          quantity: filledQty,
+          entryPrice: fillPrice,
+          stopPrice,
+          targetPrice,
+          filters: cachedFilters,
+          fetchImpl: fetchFn,
+        })
+        if (protRes.ok && protRes.protectionOrderId) {
+          protectionOrderId = protRes.protectionOrderId
+        } else if (venue.mode === 'binance-live') {
+          void dispatchRuntimeAlert({
+            tenantId,
+            type: 'ERROR',
+            severity: 'error',
+            source: 'binance-live',
+            correlationId: recordedOrder.id,
+            timestamp: nowIso,
+            message: `[PROTECTIVE-EXIT-FAILED] ${params.pair} live BUY filled (#${venueOrderId ?? recordedOrder.id}) but protective stop failed: ${protRes.error ?? 'unknown error'}`,
+          })
+        }
+      }
+
       ctx.botOwnedPosition = {
         pair: params.pair,
         side: 'BUY',
         quantity: nextQty,
-        entryPrice: Number(fillPrice.toFixed(2)),
+        entryPrice: Number(fillPrice.toFixed(4)),
         entryTime: Date.now(),
         orderId: recordedOrder.id,
         venueOrderId,
+        positionId,
+        presetId: params.presetId ?? null,
+        stopPrice,
+        targetPrice,
+        protectionOrderId,
       }
-    } else if (
-      params.side === 'SELL' &&
-      ctx.botOwnedPosition &&
-      ctx.botOwnedPosition.pair === params.pair
-    ) {
-      const remaining = Number(
-        (ctx.botOwnedPosition.quantity - filledQty).toFixed(6),
-      )
-      ctx.botOwnedPosition =
-        remaining > 1e-6
-          ? { ...ctx.botOwnedPosition, quantity: remaining }
-          : null
+
+      const openRecord: ExchangePositionRecord = {
+        id: positionId,
+        tenantId,
+        mode: venue.mode,
+        presetId: params.presetId ?? null,
+        pair: params.pair,
+        side: 'LONG',
+        status: 'OPEN',
+        entryOrderId: recordedOrder.id,
+        entryVenueOrderId: venueOrderId ?? null,
+        exitOrderId: null,
+        exitVenueOrderId: null,
+        entryQty: nextQty,
+        exitQty: null,
+        entryAvgPrice: Number(fillPrice.toFixed(4)),
+        exitAvgPrice: null,
+        entryFeeUsd: fillFeeUsd,
+        exitFeeUsd: 0,
+        stopPrice,
+        targetPrice,
+        protectionOrderId,
+        realizedPnlUsd: null,
+        rMultiple: null,
+        exitReason: null,
+        openedAt: nowIso,
+        closedAt: null,
+      }
+      await getStateStore()
+        .upsertExchangePosition(openRecord)
+        .catch(() => {})
+    } else if (params.side === 'SELL') {
+      const openRows = await getStateStore()
+        .queryExchangePositions(tenantId, {
+          mode: venue.mode,
+          pair: params.pair,
+          status: 'OPEN',
+          limit: 1,
+        })
+        .catch(() => [])
+      const openPos = openRows[0] ?? null
+
+      if (openPos) {
+        const { realizedPnlUsd, rMultiple } =
+          computeClosedExchangePositionMetrics({
+            side: openPos.side,
+            entryQty: openPos.entryQty,
+            exitQty: filledQty,
+            entryAvgPrice: openPos.entryAvgPrice,
+            exitAvgPrice: fillPrice,
+            entryFeeUsd: openPos.entryFeeUsd,
+            exitFeeUsd: fillFeeUsd,
+            stopPrice: openPos.stopPrice,
+          })
+        if (realizedPnlUsd < 0) {
+          ctx.dailyRealizedLossUsd += Math.abs(realizedPnlUsd)
+        }
+        await getStateStore()
+          .upsertExchangePosition({
+            ...openPos,
+            status: 'CLOSED',
+            exitOrderId: recordedOrder.id,
+            exitVenueOrderId: venueOrderId ?? null,
+            exitQty: filledQty,
+            exitAvgPrice: Number(fillPrice.toFixed(4)),
+            exitFeeUsd: fillFeeUsd,
+            realizedPnlUsd,
+            rMultiple,
+            exitReason: params.exitReason ?? 'bot-exit',
+            closedAt: nowIso,
+          })
+          .catch(() => {})
+      }
+
+      if (ctx.botOwnedPosition && ctx.botOwnedPosition.pair === params.pair) {
+        const remaining = Number(
+          (ctx.botOwnedPosition.quantity - filledQty).toFixed(6),
+        )
+        ctx.botOwnedPosition =
+          remaining > 1e-6
+            ? { ...ctx.botOwnedPosition, quantity: remaining }
+            : null
+      }
     }
   }
 
@@ -1291,7 +1524,7 @@ export async function cancelExchangeOrder(
     }
   }
 
-  if (existing.mode !== 'binance-testnet') {
+  if (existing.mode !== 'binance-testnet' && existing.mode !== 'binance-live') {
     return {
       ok: false,
       statusCode: 501,
@@ -1316,13 +1549,13 @@ export async function cancelExchangeOrder(
     }
   }
 
-  const creds = getTestnetCredentials()
-  if (!creds) {
+  const venue = resolveBinanceVenueCredentials()
+  if (!venue || venue.mode !== existing.mode) {
     return {
       ok: false,
       statusCode: 503,
       error:
-        'Binance Spot Testnet credentials are not configured; cannot cancel venue order.',
+        'Binance venue credentials are not configured for this order mode; cannot cancel venue order.',
       order: existing,
       snapshot: getExchangeStatusSnapshot(tenantId),
     }
@@ -1332,22 +1565,24 @@ export async function cancelExchangeOrder(
     return {
       ok: false,
       statusCode: 409,
-      error: `Order ${existing.id} has no venueOrderId to cancel on Binance Testnet.`,
+      error: `Order ${existing.id} has no venueOrderId to cancel on ${venue.mode}.`,
       order: existing,
       snapshot: getExchangeStatusSnapshot(tenantId),
     }
   }
 
+  const venueLabel =
+    venue.mode === 'binance-live' ? 'Binance Spot Live' : 'Binance Spot Testnet'
   const fetchFn = options?.fetchImpl ?? globalThis.fetch
   try {
     const symbol = existing.pair.replace('/', '')
     const query = `symbol=${symbol}&orderId=${encodeURIComponent(existing.venueOrderId)}&timestamp=${Date.now()}`
-    const signature = signQuery(query, creds.apiSecret)
+    const signature = signQuery(query, venue.apiSecret)
     const response = await fetchFn(
-      `${TESTNET_BASE_URL}/api/v3/order?${query}&signature=${signature}`,
+      `${venue.baseUrl}/api/v3/order?${query}&signature=${signature}`,
       {
         method: 'DELETE',
-        headers: { 'X-MBX-APIKEY': creds.apiKey },
+        headers: { 'X-MBX-APIKEY': venue.apiKey },
         signal: AbortSignal.timeout(TESTNET_TIMEOUT_MS),
       },
     )
@@ -1361,7 +1596,7 @@ export async function cancelExchangeOrder(
       return {
         ok: false,
         statusCode: 502,
-        error: `Binance Testnet cancel failed (HTTP ${response.status}): ${payload?.msg ?? 'Venue rejected cancel'}`,
+        error: `${venueLabel} cancel failed (HTTP ${response.status}): ${payload?.msg ?? 'Venue rejected cancel'}`,
         order: existing,
         snapshot: getExchangeStatusSnapshot(tenantId),
       }
@@ -1377,7 +1612,7 @@ export async function cancelExchangeOrder(
           ? Number(payload.executedQty)
           : existing.filledQty,
       updatedAt: nowIso,
-      reason: 'Canceled on Binance Spot Testnet by operator',
+      reason: `Canceled on ${venueLabel} by operator`,
     }
     ctx.orderHistory = ctx.orderHistory.map((o) =>
       o.id === updated.id ? updated : o,
@@ -1397,7 +1632,7 @@ export async function cancelExchangeOrder(
     return {
       ok: false,
       statusCode: 502,
-      error: `Binance Testnet cancel error: ${err instanceof Error ? err.message : String(err)}`,
+      error: `${venueLabel} cancel error: ${err instanceof Error ? err.message : String(err)}`,
       order: existing,
       snapshot: getExchangeStatusSnapshot(tenantId),
     }
@@ -1419,8 +1654,8 @@ export async function closeBotOwnedTestnetPosition(
 }> {
   const ctx = getTenantCtx(tenantId)
   const pos = ctx.botOwnedPosition
-  const creds = getTestnetCredentials()
-  if (!pos || !creds || pos.quantity <= 0) {
+  const venue = resolveBinanceVenueCredentials()
+  if (!pos || !venue || pos.quantity <= 0) {
     return { attempted: false, closed: false }
   }
 
@@ -1436,6 +1671,8 @@ export async function closeBotOwnedTestnetPosition(
     exactQuantity: pos.quantity,
     referencePrice: price,
     source: 'bot-auto',
+    presetId: pos.presetId ?? null,
+    exitReason: options?.reason ?? 'bot-close',
     bypassRiskForClose: true,
     clientOrderId: `bot-close-pos-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`,
     fetchImpl: options?.fetchImpl,
@@ -1449,8 +1686,48 @@ export async function closeBotOwnedTestnetPosition(
     attempted: true,
     closed: false,
     order: res.order,
-    error: res.error ?? 'Failed to close bot-owned Binance Testnet position.',
+    error: res.error ?? 'Failed to close bot-owned Binance position.',
   }
+}
+
+export async function reconcileExchangeVenue(
+  tenantId = DEFAULT_TENANT_ID,
+  options?: { fetchImpl?: typeof fetch },
+): Promise<VenueReconciliationReport | null> {
+  const venue = resolveBinanceVenueCredentials()
+  if (!venue) return null
+  const openPositions = await getStateStore()
+    .queryExchangePositions(tenantId, {
+      mode: venue.mode,
+      status: 'OPEN',
+      limit: 100,
+    })
+    .catch(() => [])
+  const report = await reconcileOpenBinancePositions(
+    venue,
+    openPositions,
+    options?.fetchImpl ?? globalThis.fetch,
+  )
+  const ctx = getTenantCtx(tenantId)
+  for (const closedPos of report.reconciledClosedPositions) {
+    await getStateStore()
+      .upsertExchangePosition(closedPos)
+      .catch(() => {})
+    if (
+      ctx.botOwnedPosition &&
+      (ctx.botOwnedPosition.positionId === closedPos.id ||
+        ctx.botOwnedPosition.pair === closedPos.pair)
+    ) {
+      ctx.botOwnedPosition = null
+    }
+    if (
+      typeof closedPos.realizedPnlUsd === 'number' &&
+      closedPos.realizedPnlUsd < 0
+    ) {
+      ctx.dailyRealizedLossUsd += Math.abs(closedPos.realizedPnlUsd)
+    }
+  }
+  return report
 }
 
 type KillSwitchVenueHandler = (tenantId: string, reason: string) => Promise<void>
@@ -1500,19 +1777,19 @@ export async function triggerEmergencyKillSwitch(
   }
 
   const canceledVenueOrderIds: string[] = []
-  const creds = getTestnetCredentials()
+  const venue = resolveBinanceVenueCredentials()
   const fetchFn = options?.fetchImpl ?? globalThis.fetch
-  if (creds) {
+  if (venue) {
     for (const pair of ctx.hardLimits.allowedPairs) {
       try {
         const symbol = pair.replace('/', '')
         const query = `symbol=${symbol}&timestamp=${Date.now()}`
-        const signature = signQuery(query, creds.apiSecret)
+        const signature = signQuery(query, venue.apiSecret)
         const resp = await fetchFn(
-          `${TESTNET_BASE_URL}/api/v3/openOrders?${query}&signature=${signature}`,
+          `${venue.baseUrl}/api/v3/openOrders?${query}&signature=${signature}`,
           {
             method: 'DELETE',
-            headers: { 'X-MBX-APIKEY': creds.apiKey },
+            headers: { 'X-MBX-APIKEY': venue.apiKey },
             signal: AbortSignal.timeout(TESTNET_TIMEOUT_MS),
           },
         )
@@ -1535,13 +1812,13 @@ export async function triggerEmergencyKillSwitch(
       }
     }
 
-    // Mark any tracked open testnet orders in SQL as CANCELED_KILLSWITCH
+    // Mark any tracked open Binance orders in SQL as CANCELED_KILLSWITCH
     const sqlOrders = await getStateStore()
       .queryOrders(tenantId, { limit: 100 })
       .catch(() => [])
     for (const ord of sqlOrders) {
       if (
-        ord.mode === 'binance-testnet' &&
+        (ord.mode === 'binance-testnet' || ord.mode === 'binance-live') &&
         (ord.status === 'NEW' ||
           ord.status === 'PARTIALLY_FILLED' ||
           ord.status === 'LIVE')
@@ -1562,9 +1839,9 @@ export async function triggerEmergencyKillSwitch(
     }
   }
 
-  // Close bot-owned Binance Testnet position if one is open
+  // Close bot-owned Binance position if one is open
   let closedTestnetOrder: ExchangeOrderRecord | null = null
-  if (creds && ctx.botOwnedPosition && ctx.botOwnedPosition.quantity > 0) {
+  if (venue && ctx.botOwnedPosition && ctx.botOwnedPosition.quantity > 0) {
     const closeRes = await closeBotOwnedTestnetPosition(tenantId, {
       reason: `Kill-Switch: ${reason}`,
       fetchImpl: fetchFn,
@@ -1589,7 +1866,7 @@ export async function triggerEmergencyKillSwitch(
     quantity: 0,
     filledQty: 0,
     status: 'CANCELED_KILLSWITCH',
-    mode: creds ? 'binance-testnet' : 'paper',
+    mode: venue ? venue.mode : 'paper',
     source: 'manual',
     reason: `KILL-SWITCH: ${reason}`,
   }
@@ -1597,6 +1874,16 @@ export async function triggerEmergencyKillSwitch(
   await getStateStore()
     .appendOrder(tenantId, killRecord)
     .catch(() => {})
+
+  void dispatchRuntimeAlert({
+    tenantId,
+    type: 'RISK',
+    severity: 'critical',
+    source: venue ? venue.mode : 'paper',
+    correlationId: killRecord.id,
+    timestamp: nowIso,
+    message: `[KILL-SWITCH] ${reason} (canceledVenueOrders=${canceledVenueOrderIds.length}, closedPosition=${closedTestnetOrder ? closedTestnetOrder.id : 'none'})`,
+  }).catch(() => {})
 
   return {
     snapshot: getExchangeStatusSnapshot(tenantId),

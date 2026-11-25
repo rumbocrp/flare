@@ -34,6 +34,10 @@ import type { PolymarketTimeframe, ResolutionSource } from '../polymarketAdapter
 import type {
   AuditEventRecord,
   CollectedWindowRecord,
+  ExchangePositionMode,
+  ExchangePositionQueryOptions,
+  ExchangePositionRecord,
+  ExchangePositionStatus,
   OrderQueryOptions,
   PersistedTenantEnvelope,
   PredictionStrategyLane,
@@ -324,7 +328,76 @@ const SQLITE_MIGRATIONS: readonly {
         ON training_runs (tenant_id, preset_id, created_at DESC)`,
     ],
   },
+  {
+    version: 6,
+    name: 'exchange_positions_pnl_attribution',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS exchange_positions (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        preset_id TEXT,
+        pair TEXT NOT NULL,
+        side TEXT NOT NULL,
+        status TEXT NOT NULL,
+        entry_order_id TEXT NOT NULL,
+        entry_venue_order_id TEXT,
+        exit_order_id TEXT,
+        exit_venue_order_id TEXT,
+        entry_qty REAL NOT NULL,
+        exit_qty REAL,
+        entry_avg_price REAL NOT NULL,
+        exit_avg_price REAL,
+        entry_fee_usd REAL NOT NULL DEFAULT 0,
+        exit_fee_usd REAL NOT NULL DEFAULT 0,
+        stop_price REAL,
+        target_price REAL,
+        protection_order_id TEXT,
+        realized_pnl_usd REAL,
+        r_multiple REAL,
+        exit_reason TEXT,
+        opened_at TEXT NOT NULL,
+        closed_at TEXT
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_exchange_positions_tenant_mode_status
+        ON exchange_positions (tenant_id, mode, status, opened_at DESC)`,
+      `CREATE INDEX IF NOT EXISTS idx_exchange_positions_tenant_preset_closed
+        ON exchange_positions (tenant_id, preset_id, closed_at DESC)`,
+    ],
+  },
 ]
+
+function mapExchangePositionRow(
+  row: Record<string, unknown>,
+): ExchangePositionRecord {
+  return {
+    id: String(row.id),
+    tenantId: String(row.tenant_id),
+    mode: String(row.mode) as ExchangePositionMode,
+    presetId: toNullableString(row.preset_id),
+    pair: String(row.pair),
+    side: String(row.side) === 'SHORT' ? 'SHORT' : 'LONG',
+    status: String(row.status) as ExchangePositionStatus,
+    entryOrderId: String(row.entry_order_id),
+    entryVenueOrderId: toNullableString(row.entry_venue_order_id),
+    exitOrderId: toNullableString(row.exit_order_id),
+    exitVenueOrderId: toNullableString(row.exit_venue_order_id),
+    entryQty: Number(row.entry_qty),
+    exitQty: toNullableNumber(row.exit_qty),
+    entryAvgPrice: Number(row.entry_avg_price),
+    exitAvgPrice: toNullableNumber(row.exit_avg_price),
+    entryFeeUsd: Number(row.entry_fee_usd ?? 0),
+    exitFeeUsd: Number(row.exit_fee_usd ?? 0),
+    stopPrice: toNullableNumber(row.stop_price),
+    targetPrice: toNullableNumber(row.target_price),
+    protectionOrderId: toNullableString(row.protection_order_id),
+    realizedPnlUsd: toNullableNumber(row.realized_pnl_usd),
+    rMultiple: toNullableNumber(row.r_multiple),
+    exitReason: toNullableString(row.exit_reason),
+    openedAt: String(row.opened_at),
+    closedAt: toNullableString(row.closed_at),
+  }
+}
 
 function toNullableNumber(value: unknown): number | null {
   if (value === null || value === undefined) return null
@@ -1684,6 +1757,103 @@ export class SqliteStateStore implements StateStore {
       )
       .all(tenantId) as Record<string, unknown>[]
     return rows.map(mapStrategyStateRow)
+  }
+
+  async upsertExchangePosition(position: ExchangePositionRecord): Promise<void> {
+    if (this.closed) return
+    this.db
+      .prepare(
+        `INSERT INTO exchange_positions (
+          id, tenant_id, mode, preset_id, pair, side, status,
+          entry_order_id, entry_venue_order_id, exit_order_id, exit_venue_order_id,
+          entry_qty, exit_qty, entry_avg_price, exit_avg_price,
+          entry_fee_usd, exit_fee_usd, stop_price, target_price,
+          protection_order_id, realized_pnl_usd, r_multiple, exit_reason,
+          opened_at, closed_at
+        ) VALUES (
+          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        )
+        ON CONFLICT(id) DO UPDATE SET
+          status = excluded.status,
+          exit_order_id = COALESCE(excluded.exit_order_id, exchange_positions.exit_order_id),
+          exit_venue_order_id = COALESCE(excluded.exit_venue_order_id, exchange_positions.exit_venue_order_id),
+          exit_qty = COALESCE(excluded.exit_qty, exchange_positions.exit_qty),
+          exit_avg_price = COALESCE(excluded.exit_avg_price, exchange_positions.exit_avg_price),
+          exit_fee_usd = excluded.exit_fee_usd,
+          stop_price = COALESCE(excluded.stop_price, exchange_positions.stop_price),
+          target_price = COALESCE(excluded.target_price, exchange_positions.target_price),
+          protection_order_id = COALESCE(excluded.protection_order_id, exchange_positions.protection_order_id),
+          realized_pnl_usd = COALESCE(excluded.realized_pnl_usd, exchange_positions.realized_pnl_usd),
+          r_multiple = COALESCE(excluded.r_multiple, exchange_positions.r_multiple),
+          exit_reason = COALESCE(excluded.exit_reason, exchange_positions.exit_reason),
+          closed_at = COALESCE(excluded.closed_at, exchange_positions.closed_at)`,
+      )
+      .run(
+        position.id,
+        position.tenantId,
+        position.mode,
+        position.presetId,
+        position.pair,
+        position.side,
+        position.status,
+        position.entryOrderId,
+        position.entryVenueOrderId,
+        position.exitOrderId,
+        position.exitVenueOrderId,
+        position.entryQty,
+        position.exitQty,
+        position.entryAvgPrice,
+        position.exitAvgPrice,
+        position.entryFeeUsd,
+        position.exitFeeUsd,
+        position.stopPrice,
+        position.targetPrice,
+        position.protectionOrderId,
+        position.realizedPnlUsd,
+        position.rMultiple,
+        position.exitReason,
+        position.openedAt,
+        position.closedAt,
+      )
+  }
+
+  async queryExchangePositions(
+    tenantId: string,
+    options: ExchangePositionQueryOptions = {},
+  ): Promise<ExchangePositionRecord[]> {
+    if (this.closed) return []
+    const clauses: string[] = ['tenant_id = ?']
+    const params: (string | number)[] = [tenantId]
+    if (options.mode) {
+      clauses.push('mode = ?')
+      params.push(options.mode)
+    }
+    if (options.presetId) {
+      clauses.push('preset_id = ?')
+      params.push(options.presetId)
+    }
+    if (options.pair) {
+      clauses.push('pair = ?')
+      params.push(options.pair)
+    }
+    if (options.status) {
+      clauses.push('status = ?')
+      params.push(options.status)
+    }
+    const safeLimit = Math.max(
+      1,
+      Math.min(1_000, Math.round(options.limit ?? 200)),
+    )
+    params.push(safeLimit)
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM exchange_positions
+         WHERE ${clauses.join(' AND ')}
+         ORDER BY COALESCE(closed_at, opened_at) DESC, id DESC
+         LIMIT ?`,
+      )
+      .all(...params) as Record<string, unknown>[]
+    return rows.map(mapExchangePositionRow)
   }
 
   async pruneRetention(

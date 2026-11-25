@@ -255,6 +255,61 @@ export type HistoricalCandlesResponse = {
   cachedBars: number
 }
 
+export type ShadowExchangePositionSummary = {
+  id: string
+  mode: 'binance-testnet' | 'binance-live'
+  presetId: string | null
+  pair: string
+  side: 'LONG' | 'SHORT'
+  status: 'OPEN' | 'CLOSED'
+  entryOrderId: string
+  entryVenueOrderId: string | null
+  exitOrderId: string | null
+  exitVenueOrderId: string | null
+  entryQty: number
+  exitQty: number | null
+  entryAvgPrice: number
+  exitAvgPrice: number | null
+  totalFeesUsd: number
+  stopPrice: number | null
+  targetPrice: number | null
+  protectionOrderId: string | null
+  realizedPnlUsd: number | null
+  rMultiple: number | null
+  exitReason: string | null
+  openedAt: string
+  closedAt: string | null
+}
+
+export type ShadowVenueActivity = {
+  orderCount: number
+  filledOrderCount: number
+  totalNotionalUsd: number
+  totalFeesUsd: number
+  pnlAttributionAvailable: boolean
+  note: string
+  closedPositionCount?: number
+  openPositionCount?: number
+  realizedPnlUsd?: number | null
+  winRatePct?: number | null
+  profitFactor?: number | null
+  averageR?: number | null
+  positions?: ShadowExchangePositionSummary[]
+  orders: {
+    id: string
+    timestamp: string
+    pair: string
+    side: 'BUY' | 'SELL'
+    notionalUsd: number
+    filledQty: number | null
+    avgPrice: number | null
+    fee: number | null
+    feeAsset: string | null
+    status: string
+    venueOrderId: string | null
+  }[]
+}
+
 export type TrainingLiveShadowResponse = {
   presetId: string
   fromTimeMs: number | null
@@ -271,27 +326,8 @@ export type TrainingLiveShadowResponse = {
     averageR: number | null
     totalFeesUsd: number
   }
-  testnet: {
-    orderCount: number
-    filledOrderCount: number
-    totalNotionalUsd: number
-    totalFeesUsd: number
-    pnlAttributionAvailable: false
-    note: string
-    orders: {
-      id: string
-      timestamp: string
-      pair: string
-      side: 'BUY' | 'SELL'
-      notionalUsd: number
-      filledQty: number | null
-      avgPrice: number | null
-      fee: number | null
-      feeAsset: string | null
-      status: string
-      venueOrderId: string | null
-    }[]
-  }
+  testnet: ShadowVenueActivity
+  live?: ShadowVenueActivity
   mt5: {
     executionState: string
     signalOnly: true

@@ -28,8 +28,15 @@ Backup/
 
 # Agent local tooling & server runtime state
 .agent/
+.playwright-mcp/
+.scratch/
+.env
+.env.*
+!.env.example
 src/server/bot-state.json
 src/server/bot-state.json.*
 src/server/*.db
 src/server/*.db-wal
 src/server/*.db-shm
+src/server/*.bak
+*.bak

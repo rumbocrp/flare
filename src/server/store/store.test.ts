@@ -86,9 +86,9 @@ describe('P0-4 Storage (SQLite WAL + Postgres/Timescale), Double-Entry Ledger & 
     const dbPath = path.join(tmpDir, 'flare.db')
     const store = new SqliteStateStore(dbPath)
     try {
-      expect(await store.getSchemaVersion()).toBe(5)
+      expect(await store.getSchemaVersion()).toBe(6)
       // Idempotent second migration call
-      expect(await store.migrate()).toBe(5)
+      expect(await store.migrate()).toBe(6)
 
       const preset = STRATEGY_PRESETS[0]
       await store.saveTenantSnapshot({
@@ -234,8 +234,8 @@ describe('P0-4 Storage (SQLite WAL + Postgres/Timescale), Double-Entry Ledger & 
     const pgStore = new PostgresStateStore(mockPool, 'postgres://test')
     const latest = await pgStore.migrate()
     expect(latest).toBe(POSTGRES_MIGRATIONS.length)
-    expect(latest).toBe(5)
-    expect(await pgStore.getSchemaVersion()).toBe(5)
+    expect(latest).toBe(6)
+    expect(await pgStore.getSchemaVersion()).toBe(6)
     expect(executedSql.some((s) => s.includes('create_hypertable'))).toBe(true)
     expect(
       executedSql.some((s) =>
@@ -343,8 +343,8 @@ describe('P0-4 Storage (SQLite WAL + Postgres/Timescale), Double-Entry Ledger & 
     const nowMs = 1_760_000_000_000
 
     try {
-      expect(await store.getSchemaVersion()).toBe(5)
-      expect(await store.migrate()).toBe(5)
+      expect(await store.getSchemaVersion()).toBe(6)
+      expect(await store.migrate()).toBe(6)
 
       // 1. Window upsert + COALESCE preservation of pinned openTwap & non-unknown resolutionSource
       await store.upsertPredictionWindow({
@@ -584,7 +584,7 @@ describe('P0-4 Storage (SQLite WAL + Postgres/Timescale), Double-Entry Ledger & 
       // 5. Persistence across close + reopen
       await store.close()
       store = new SqliteStateStore(dbPath)
-      expect(await store.getSchemaVersion()).toBe(5)
+      expect(await store.getSchemaVersion()).toBe(6)
 
       const states = await store.getStrategyModeStates('default')
       expect(states).toHaveLength(2)
@@ -1204,7 +1204,7 @@ describe('P0-4 Storage (SQLite WAL + Postgres/Timescale), Double-Entry Ledger & 
     const dbPath = path.join(tmpDir, 'flare-v4.db')
     const store = new SqliteStateStore(dbPath)
     try {
-      expect(await store.getSchemaVersion()).toBe(5)
+      expect(await store.getSchemaVersion()).toBe(6)
 
       await store.appendRuntimeEvent({
         id: 'EVT-1',
@@ -1288,7 +1288,7 @@ describe('P0-4 Storage (SQLite WAL + Postgres/Timescale), Double-Entry Ledger & 
     const dbPath = path.join(tmpDir, 'flare-v5.db')
     const store = new SqliteStateStore(dbPath)
     try {
-      expect(await store.getSchemaVersion()).toBe(5)
+      expect(await store.getSchemaVersion()).toBe(6)
 
       await store.upsertCandles('BTC/USDT', '15m', [
         { time: 1_700_000_000_000, open: 100, high: 105, low: 98, close: 102, volume: 10 },

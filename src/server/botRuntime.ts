@@ -57,6 +57,10 @@ import type {
 } from '../training/types'
 import type { Interval, Strategy } from '../types'
 import {
+  dispatchRuntimeAlert,
+  getAlertDispatcherStatus,
+} from './alertDispatcher'
+import {
   authenticateRequest,
   authorizePermission,
   checkRateLimit,
@@ -81,6 +85,7 @@ import {
   fundPaperAccount,
   getExchangeStatusSnapshot,
   getTenantLedgerSnapshot,
+  reconcileExchangeVenue,
   resetEmergencyKillSwitch,
   restoreExchangeState,
   setExchangeAutoMirror,
@@ -522,7 +527,7 @@ function recordAudit(
   }
   void getStateStore()
     .appendAuditEvent(event)
-    .catch(() => {})
+    .catch(() => { })
 }
 
 function recordRuntimeEvent(
@@ -550,7 +555,8 @@ function recordRuntimeEvent(
   }
   void getStateStore()
     .appendRuntimeEvent(event)
-    .catch(() => {})
+    .catch(() => { })
+  void dispatchRuntimeAlert(event).catch(() => {})
   return event
 }
 
@@ -917,6 +923,8 @@ async function tickBot(
             exchangeSnap.hardLimits.maxOrderNotionalUsd,
           ),
           referencePrice: newPos.entryPrice,
+          stopPrice: newPos.stopPrice,
+          targetPrice: newPos.targetPrice,
           source: 'bot-auto',
           presetId: rt.activePreset.id,
           clientOrderId: `bot-open-${rt.activePreset.id}-${newPos.entryTime}`,
@@ -941,6 +949,12 @@ async function tickBot(
       } else if (rt.engineState.closedTrades.length > prevClosedCount) {
         const closed = rt.engineState.closedTrades[0]
         if (closed) {
+          const botOwnedQty =
+            exchangeSnap.botOwnedPosition &&
+            exchangeSnap.botOwnedPosition.pair === closed.pair &&
+            exchangeSnap.botOwnedPosition.quantity > 0
+              ? exchangeSnap.botOwnedPosition.quantity
+              : undefined
           const closeOrderRes = await submitExchangeOrder({
             tenantId,
             pair: closed.pair,
@@ -949,8 +963,10 @@ async function tickBot(
               closed.size,
               exchangeSnap.hardLimits.maxOrderNotionalUsd,
             ),
+            exactQuantity: botOwnedQty,
             referencePrice: closed.exitPrice,
             realizedPnlUsd: closed.pnl,
+            exitReason: closed.exitReason,
             source: 'bot-auto',
             presetId: closed.presetId ?? rt.activePreset.id,
             bypassRiskForClose: true,
@@ -1072,7 +1088,7 @@ export function ensureBackgroundWorker(): void {
   if (!process.env.VITEST) {
     void getStateStore()
       .markRunningTrainingRunsInterrupted()
-      .catch(() => {})
+      .catch(() => { })
     void getOracleFeed().start()
     getPredictionRunner().start()
   }
@@ -1807,7 +1823,7 @@ export async function handleBotApiRequest(
           }
           await getStateStore()
             .appendStrategyAudit(auditRecord)
-            .catch(() => {})
+            .catch(() => { })
           return {
             ...metrics,
             pair: preset.strategy.pair,
@@ -2646,9 +2662,9 @@ export async function handleBotApiRequest(
     const typesRaw = url.searchParams.get('types')?.trim() ?? ''
     const types = typesRaw
       ? typesRaw
-          .split(',')
-          .map((t) => t.trim().toUpperCase() as RuntimeEventType)
-          .filter((t) => validEventTypes.has(t))
+        .split(',')
+        .map((t) => t.trim().toUpperCase() as RuntimeEventType)
+        .filter((t) => validEventTypes.has(t))
       : undefined
     const q = url.searchParams.get('q')?.trim() || undefined
     const before = url.searchParams.get('before')?.trim() || undefined
@@ -3478,8 +3494,8 @@ export async function handleBotApiRequest(
       parsed?.side === 'SELL' ? 'SELL' : 'BUY'
     const orderType: PolymarketOrderType =
       parsed?.orderType === 'GTC' ||
-      parsed?.orderType === 'GTD' ||
-      parsed?.orderType === 'FAK'
+        parsed?.orderType === 'GTD' ||
+        parsed?.orderType === 'FAK'
         ? parsed.orderType
         : 'FOK'
 
@@ -3553,9 +3569,9 @@ export async function handleBotApiRequest(
     const result =
       parsed?.cancelAll || !parsed?.orderId
         ? await cancelAllPolymarketOrders(
-            tenantId,
-            parsed?.reason ?? 'Operator cancel-all',
-          )
+          tenantId,
+          parsed?.reason ?? 'Operator cancel-all',
+        )
         : await cancelPolymarketOrder(parsed.orderId, tenantId)
 
     recordAudit(
@@ -4086,8 +4102,8 @@ export async function handleBotApiRequest(
     const cfg = validated.config
     const candleCount =
       typeof parsed.candleCount === 'number' &&
-      Number.isFinite(parsed.candleCount) &&
-      parsed.candleCount >= 0
+        Number.isFinite(parsed.candleCount) &&
+        parsed.candleCount >= 0
         ? Math.min(MAX_HISTORY_BARS, Math.round(parsed.candleCount))
         : 0
     const dataSource =
@@ -4270,26 +4286,157 @@ export async function handleBotApiRequest(
         ? computeWilsonLowerBoundPct(paperBase.wins, paperBase.totalTrades)
         : null
 
-    const rawTestnetOrders = await getStateStore().queryOrders(tenantId, {
-      presetId,
-      mode: 'binance-testnet',
-      limit: 500,
-    })
-    const testnetOrders = rawTestnetOrders.filter((o) => {
-      const ts = Date.parse(o.timestamp)
-      if (fromMs !== null && Number.isFinite(ts) && ts < fromMs) return false
-      if (toMs !== null && Number.isFinite(ts) && ts > toMs) return false
-      return true
-    })
-    const filledOrders = testnetOrders.filter(
-      (o) => o.status === 'FILLED' || o.status === 'PARTIALLY_FILLED',
-    )
-    const totalNotionalUsd = Math.round(
-      filledOrders.reduce((acc, o) => acc + o.notionalUsd, 0) * 100,
-    ) / 100
-    const totalFeesUsd = Math.round(
-      filledOrders.reduce((acc, o) => acc + (o.fee ?? 0), 0) * 10_000,
-    ) / 10_000
+    const buildVenueActivity = async (
+      mode: 'binance-testnet' | 'binance-live',
+    ) => {
+      const rawOrders = await getStateStore().queryOrders(tenantId, {
+        presetId,
+        mode,
+        limit: 500,
+      })
+      const orders = rawOrders.filter((o) => {
+        const ts = Date.parse(o.timestamp)
+        if (fromMs !== null && Number.isFinite(ts) && ts < fromMs) return false
+        if (toMs !== null && Number.isFinite(ts) && ts > toMs) return false
+        return true
+      })
+      const filledOrders = orders.filter(
+        (o) => o.status === 'FILLED' || o.status === 'PARTIALLY_FILLED',
+      )
+      const totalNotionalUsd =
+        Math.round(
+          filledOrders.reduce((acc, o) => acc + o.notionalUsd, 0) * 100,
+        ) / 100
+      const totalFeesUsd =
+        Math.round(
+          filledOrders.reduce((acc, o) => acc + (o.fee ?? 0), 0) * 10_000,
+        ) / 10_000
+
+      const rawPositions = await getStateStore()
+        .queryExchangePositions(tenantId, {
+          presetId,
+          mode,
+          limit: 200,
+        })
+        .catch(() => [])
+      const positions = rawPositions.filter((p) => {
+        const ts = Date.parse(p.closedAt ?? p.openedAt)
+        if (fromMs !== null && Number.isFinite(ts) && ts < fromMs) return false
+        if (toMs !== null && Number.isFinite(ts) && ts > toMs) return false
+        return true
+      })
+      const closedPositions = positions.filter(
+        (p) => p.status === 'CLOSED' && p.realizedPnlUsd !== null,
+      )
+      const openPositionCount = positions.filter(
+        (p) => p.status === 'OPEN',
+      ).length
+      const hasAttributedPnl = closedPositions.length > 0
+
+      let realizedPnlUsd: number | null = null
+      let winRatePct: number | null = null
+      let profitFactor: number | null = null
+      let averageR: number | null = null
+
+      if (hasAttributedPnl) {
+        realizedPnlUsd = Number(
+          closedPositions
+            .reduce((acc, p) => acc + (p.realizedPnlUsd ?? 0), 0)
+            .toFixed(4),
+        )
+        const wins = closedPositions.filter(
+          (p) => (p.realizedPnlUsd ?? 0) > 0,
+        ).length
+        winRatePct = Number(
+          ((wins / closedPositions.length) * 100).toFixed(1),
+        )
+        const grossProfit = closedPositions
+          .filter((p) => (p.realizedPnlUsd ?? 0) > 0)
+          .reduce((acc, p) => acc + (p.realizedPnlUsd ?? 0), 0)
+        const grossLoss = Math.abs(
+          closedPositions
+            .filter((p) => (p.realizedPnlUsd ?? 0) < 0)
+            .reduce((acc, p) => acc + (p.realizedPnlUsd ?? 0), 0),
+        )
+        profitFactor =
+          grossLoss > 1e-9
+            ? Number((grossProfit / grossLoss).toFixed(2))
+            : grossProfit > 0
+              ? 99.99
+              : null
+        const rValues = closedPositions
+          .map((p) => p.rMultiple)
+          .filter((r): r is number => typeof r === 'number' && Number.isFinite(r))
+        averageR =
+          rValues.length > 0
+            ? Number(
+                (
+                  rValues.reduce((acc, r) => acc + r, 0) / rValues.length
+                ).toFixed(3),
+              )
+            : null
+      }
+
+      return {
+        orderCount: orders.length,
+        filledOrderCount: filledOrders.length,
+        totalNotionalUsd,
+        totalFeesUsd,
+        pnlAttributionAvailable: hasAttributedPnl,
+        note: hasAttributedPnl
+          ? `Realized PnL attributed from ${closedPositions.length} paired ${mode} position(s).`
+          : 'PnL attribution not available until exchange position IDs exist. Order-level fills and fees only.',
+        closedPositionCount: closedPositions.length,
+        openPositionCount,
+        realizedPnlUsd,
+        winRatePct,
+        profitFactor,
+        averageR,
+        positions: positions.map((p) => ({
+          id: p.id,
+          mode: p.mode,
+          presetId: p.presetId,
+          pair: p.pair,
+          side: p.side,
+          status: p.status,
+          entryOrderId: p.entryOrderId,
+          entryVenueOrderId: p.entryVenueOrderId,
+          exitOrderId: p.exitOrderId,
+          exitVenueOrderId: p.exitVenueOrderId,
+          entryQty: p.entryQty,
+          exitQty: p.exitQty,
+          entryAvgPrice: p.entryAvgPrice,
+          exitAvgPrice: p.exitAvgPrice,
+          totalFeesUsd: Number((p.entryFeeUsd + p.exitFeeUsd).toFixed(6)),
+          stopPrice: p.stopPrice,
+          targetPrice: p.targetPrice,
+          protectionOrderId: p.protectionOrderId,
+          realizedPnlUsd: p.realizedPnlUsd,
+          rMultiple: p.rMultiple,
+          exitReason: p.exitReason,
+          openedAt: p.openedAt,
+          closedAt: p.closedAt,
+        })),
+        orders: orders.map((o) => ({
+          id: o.id,
+          timestamp: o.timestamp,
+          pair: o.pair,
+          side: o.side,
+          notionalUsd: o.notionalUsd,
+          filledQty: o.filledQty ?? null,
+          avgPrice: o.avgPrice ?? null,
+          fee: o.fee ?? null,
+          feeAsset: o.feeAsset ?? null,
+          status: o.status,
+          venueOrderId: o.venueOrderId ?? null,
+        })),
+      }
+    }
+
+    const [testnetActivity, liveActivity] = await Promise.all([
+      buildVenueActivity('binance-testnet'),
+      buildVenueActivity('binance-live'),
+    ])
 
     const mt5Snap = getMt5BridgeSnapshot(
       rt.engineState,
@@ -4313,27 +4460,10 @@ export async function handleBotApiRequest(
         averageR: paperSummary.avgR,
         totalFeesUsd: paperSummary.totalFeesUsd,
       },
-      testnet: {
-        orderCount: testnetOrders.length,
-        filledOrderCount: filledOrders.length,
-        totalNotionalUsd,
-        totalFeesUsd,
-        pnlAttributionAvailable: false,
-        note: 'PnL attribution not available until exchange position IDs exist. Order-level fills and fees only.',
-        orders: testnetOrders.map((o) => ({
-          id: o.id,
-          timestamp: o.timestamp,
-          pair: o.pair,
-          side: o.side,
-          notionalUsd: o.notionalUsd,
-          filledQty: o.filledQty ?? null,
-          avgPrice: o.avgPrice ?? null,
-          fee: o.fee ?? null,
-          feeAsset: o.feeAsset ?? null,
-          status: o.status,
-          venueOrderId: o.venueOrderId ?? null,
-        })),
-      },
+      testnet: testnetActivity,
+      ...(liveActivity.orderCount > 0 || liveActivity.positions.length > 0
+        ? { live: liveActivity }
+        : {}),
       mt5: {
         executionState: mt5Snap.executionState,
         signalOnly: true,
@@ -4344,6 +4474,145 @@ export async function handleBotApiRequest(
     }
 
     sendJson(res, 200, payload, responseHeaders)
+    return true
+  }
+
+  // 30. GET /api/exchange/positions -> Durable SQL exchange_positions ledger
+  if (req.method === 'GET' && url.pathname === '/api/exchange/positions') {
+    if (
+      !enforcePermission(
+        principal,
+        'read:state',
+        res,
+        responseHeaders,
+        url.pathname,
+      )
+    ) {
+      return true
+    }
+    const modeRaw = url.searchParams.get('mode')?.trim()
+    const mode =
+      modeRaw === 'binance-testnet' || modeRaw === 'binance-live'
+        ? modeRaw
+        : undefined
+    const statusRaw = url.searchParams.get('status')?.trim().toUpperCase()
+    const status =
+      statusRaw === 'OPEN' || statusRaw === 'CLOSED' ? statusRaw : undefined
+    const presetIdParam = url.searchParams.get('presetId')?.trim() || undefined
+    const pairParam = url.searchParams.get('pair')?.trim() || undefined
+    const limitParam = Number(url.searchParams.get('limit') ?? 100)
+    const positions = await getStateStore().queryExchangePositions(tenantId, {
+      mode,
+      status,
+      presetId: presetIdParam,
+      pair: pairParam,
+      limit: Number.isFinite(limitParam) ? limitParam : 100,
+    })
+    sendJson(res, 200, { positions }, responseHeaders)
+    return true
+  }
+
+  // 31. POST /api/exchange/reconcile -> Reconcile open Binance positions against venue fills
+  if (req.method === 'POST' && url.pathname === '/api/exchange/reconcile') {
+    if (
+      !enforcePermission(
+        principal,
+        'trade:execute',
+        res,
+        responseHeaders,
+        url.pathname,
+      )
+    ) {
+      return true
+    }
+    const report = await reconcileExchangeVenue(tenantId)
+    if (!report) {
+      sendJson(
+        res,
+        200,
+        {
+          reconciled: false,
+          reason:
+            'No Binance Testnet or armed Binance Live venue credentials configured.',
+        },
+        responseHeaders,
+      )
+      return true
+    }
+    if (report.reconciledClosedPositions.length > 0) {
+      for (const pos of report.reconciledClosedPositions) {
+        recordRuntimeEvent(tenantId, {
+          type: 'TRADE',
+          severity: 'info',
+          source: report.mode,
+          correlationId: pos.id,
+          message: `[RECONCILED] ${pos.pair} closed on ${report.mode} (${pos.exitReason ?? 'venue'}) · PnL ${pos.realizedPnlUsd !== null && pos.realizedPnlUsd >= 0 ? '+' : ''}$${(pos.realizedPnlUsd ?? 0).toFixed(2)}`,
+        })
+      }
+      saveStateToDisk(tenantId)
+      broadcastSseUpdate(tenantId)
+    }
+    recordAudit(principal, 'exchange:reconcile', url.pathname, 'allowed', {
+      mode: report.mode,
+      checked: report.checkedOpenPositions,
+      reconciledClosed: report.reconciledClosedPositions.length,
+    })
+    sendJson(res, 200, { reconciled: true, report }, responseHeaders)
+    return true
+  }
+
+  // 32. GET /api/alerts/status -> External alert dispatcher configuration & telemetry
+  if (req.method === 'GET' && url.pathname === '/api/alerts/status') {
+    if (
+      !enforcePermission(
+        principal,
+        'read:state',
+        res,
+        responseHeaders,
+        url.pathname,
+      )
+    ) {
+      return true
+    }
+    sendJson(res, 200, getAlertDispatcherStatus(), responseHeaders)
+    return true
+  }
+
+  // 33. POST /api/alerts/test -> Send a forced test alert to verify Telegram/Webhook delivery
+  if (req.method === 'POST' && url.pathname === '/api/alerts/test') {
+    if (
+      !enforcePermission(
+        principal,
+        'trade:execute',
+        res,
+        responseHeaders,
+        url.pathname,
+      )
+    ) {
+      return true
+    }
+    const outcome = await dispatchRuntimeAlert(
+      {
+        tenantId,
+        type: 'OPERATOR',
+        severity: 'info',
+        source: 'alerts-test',
+        correlationId: `test-${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        message: `[TEST] Operator alert connectivity check triggered by ${principal.subject}.`,
+      },
+      { force: true },
+    )
+    recordAudit(principal, 'alerts:test', url.pathname, 'allowed', {
+      dispatched: outcome.dispatched,
+      channels: outcome.results.length,
+    })
+    sendJson(
+      res,
+      200,
+      { ...outcome, status: getAlertDispatcherStatus() },
+      responseHeaders,
+    )
     return true
   }
 
@@ -4626,8 +4895,8 @@ export async function handleBotApiRequest(
 
       const nextCandleCount =
         typeof parsed.candleCount === 'number' &&
-        Number.isFinite(parsed.candleCount) &&
-        parsed.candleCount > 0
+          Number.isFinite(parsed.candleCount) &&
+          parsed.candleCount > 0
           ? Math.min(MAX_HISTORY_BARS, Math.round(parsed.candleCount))
           : existing.candleCount
       const nextDataSource =
@@ -4694,7 +4963,7 @@ export async function handleBotApiRequest(
       }
       await getStateStore()
         .appendStrategyAudit(auditRow)
-        .catch(() => {})
+        .catch(() => { })
 
       recordAudit(principal, 'training:complete', url.pathname, 'allowed', {
         runId,

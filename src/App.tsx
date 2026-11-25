@@ -30,6 +30,10 @@ import { I18nProvider } from './i18n'
 import { cn } from './lib/utils'
 import { isPrimaryNavPage, popNavHistory, pushNavHistory } from './navItems'
 import type { PredictionFocusTarget } from './pages/Predictions'
+import {
+  applyDocumentMetadata,
+  resolvePageFromPathname,
+} from './training/pageMeta'
 
 const BACKTEST_KEY = 'lixtrd:last-backtest'
 const BACKTEST_HISTORY_KEY = 'lixtrd:backtest-history'
@@ -52,7 +56,11 @@ function PageLoadFallback() {
 }
 
 function App() {
-  const [activePage, setActivePage] = useState<PageId>('dashboard')
+  const [activePage, setActivePage] = useState<PageId>(() =>
+    typeof window !== 'undefined'
+      ? resolvePageFromPathname(window.location.pathname)
+      : 'dashboard',
+  )
   const [pageHistory, setPageHistory] = useState<PageId[]>([])
   const [botStatus, setBotStatus] = useState<BotStatus>('stopped')
   const [terminalPair, setTerminalPair] = useState<string | null>(null)
@@ -115,6 +123,21 @@ function App() {
   useEffect(() => {
     setApiBaseUrl(normalizedSettings.apiBaseUrl || null)
   }, [normalizedSettings.apiBaseUrl])
+
+  useEffect(() => {
+    const meta = applyDocumentMetadata(activePage, language)
+    if (
+      typeof window !== 'undefined' &&
+      typeof window.history?.replaceState === 'function' &&
+      window.location.pathname !== meta.path
+    ) {
+      try {
+        window.history.replaceState(null, '', meta.path)
+      } catch {
+        // Ignore history restrictions in sandboxed/file contexts
+      }
+    }
+  }, [activePage, language])
 
   function handleSaveStrategy(nextStrategy: Strategy) {
     setStrategy(nextStrategy)

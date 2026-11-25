@@ -3,6 +3,7 @@ import { Play, RefreshCw, WifiOff } from 'lucide-react'
 import {
   BackendApiError,
   fetchLatestBotAccuracyAudit,
+  selectBotPresetOnServer,
   type StrategyAuditRecord,
 } from '@/api/botClient'
 import {
@@ -15,15 +16,23 @@ import {
   listTrainingRunsApi,
   patchTrainingRunApi,
 } from '@/api/trainingClient'
-import { loadCustomBotProfiles } from '@/botProfiles'
+import type { StrategyPreset, StrategyPresetPatch } from '@/botEngine'
+import {
+  deleteCustomBotProfile,
+  loadCustomBotProfiles,
+  upsertCustomBotProfile,
+  type SavedBotProfile,
+} from '@/botProfiles'
 import PageHeader from '@/components/PageHeader'
 import BacktestTab from '@/components/training/BacktestTab'
+import CustomizePanel from '@/components/training/CustomizePanel'
 import EquityTab from '@/components/training/EquityTab'
 import FoldsTab from '@/components/training/FoldsTab'
 import OverviewTab from '@/components/training/OverviewTab'
 import RunBar from '@/components/training/RunBar'
 import RunConfig from '@/components/training/RunConfig'
 import RunHistory from '@/components/training/RunHistory'
+import ShadowTab from '@/components/training/ShadowTab'
 import StrategyCatalog from '@/components/training/StrategyCatalog'
 import TradesTab from '@/components/training/TradesTab'
 import { Badge } from '@/components/ui/badge'
@@ -38,6 +47,12 @@ import {
   type TrainingFormDraft,
 } from '@/training/formDraft'
 import { TrainingCancelledError } from '@/training/runner'
+import {
+  applyPresetPatchWithClamps,
+  buildPromotionPlan,
+  findCatalogBasePreset,
+  type ClampedFieldNotice,
+} from '@/training/shadowAndCustomize'
 import { buildTrainingCatalog } from '@/training/strategyRegistry'
 import type {
   HistoricalCandlesMissingSpan,
@@ -96,14 +111,24 @@ function saveTrainingSectionState(state: TrainingSectionState): void {
   }
 }
 
-type WorkspaceTab = 'overview' | 'folds' | 'trades' | 'equity' | 'backtest'
+type WorkspaceTab =
+  | 'overview'
+  | 'folds'
+  | 'trades'
+  | 'equity'
+  | 'backtest'
+  | 'shadow'
+  | 'customize'
 
 function Training({ onNavigate }: TrainingProps) {
   const { t } = useI18n()
 
+  const [customProfiles, setCustomProfiles] = useState<SavedBotProfile[]>(() =>
+    loadCustomBotProfiles(),
+  )
   const catalog = useMemo(
-    () => buildTrainingCatalog(loadCustomBotProfiles()),
-    [],
+    () => buildTrainingCatalog(customProfiles),
+    [customProfiles],
   )
   const presetNameMap = useMemo(() => {
     const map = new Map<string, string>()
@@ -122,6 +147,16 @@ function Training({ onNavigate }: TrainingProps) {
     [catalog, selectedCatalogId],
   )
 
+  const catalogBasePreset = useMemo(
+    () => findCatalogBasePreset(selectedItem),
+    [selectedItem],
+  )
+
+  const [workingPreset, setWorkingPreset] = useState<StrategyPreset>(
+    () => catalog[0].preset,
+  )
+  const [clamps, setClamps] = useState<ClampedFieldNotice[]>([])
+
   const [draft, setDraft] = useState<TrainingFormDraft>(() =>
     buildDefaultDraft(catalog[0], Date.now()),
   )
@@ -137,8 +172,14 @@ function Training({ onNavigate }: TrainingProps) {
   const [runsError, setRunsError] = useState<string | null>(null)
   const [audits, setAudits] = useState<StrategyAuditRecord[]>([])
   const [selectedRun, setSelectedRun] = useState<TrainingRunRecord | null>(null)
+
+  // Live Shadow state (real /api/training/live — zero fallback)
   const [shadowData, setShadowData] =
     useState<TrainingLiveShadowResponse | null>(null)
+  const [shadowFetchedKey, setShadowFetchedKey] = useState<string | null>(null)
+  const [shadowError, setShadowError] = useState<string | null>(null)
+  const [shadowLoadedAtMs, setShadowLoadedAtMs] = useState<number | null>(null)
+  const [shadowNonce, setShadowNonce] = useState(0)
 
   // Active execution state (progress isolated to RunBar)
   const [activeRunId, setActiveRunId] = useState<string | null>(null)
@@ -158,9 +199,17 @@ function Training({ onNavigate }: TrainingProps) {
   const activeRunIdRef = useRef<string | null>(null)
   const [reloadNonce, setReloadNonce] = useState(0)
 
+  const effectiveSelectedItem = useMemo(
+    () => ({
+      ...selectedItem,
+      preset: workingPreset,
+    }),
+    [selectedItem, workingPreset],
+  )
+
   const validation = useMemo(
-    () => validateTrainingDraft(draft, selectedItem, nowMs, t),
-    [draft, nowMs, selectedItem, t],
+    () => validateTrainingDraft(draft, effectiveSelectedItem, nowMs, t),
+    [draft, effectiveSelectedItem, nowMs, t],
   )
 
   // Lightweight wall-clock tick for relative timestamps and real ETA calculation
@@ -224,11 +273,16 @@ function Training({ onNavigate }: TrainingProps) {
     }
   }, [reloadNonce, selectedItem.presetId])
 
-  // Fetch live Shadow summary for the selected strategy (feeds the 4-stage funnel)
+  const currentShadowKey = `${selectedItem.presetId}:${reloadNonce}:${shadowNonce}`
+  const shadowLoading =
+    !backendOffline && shadowFetchedKey !== currentShadowKey
+
+  // Fetch live Shadow operations for the selected strategy (feeds Funnel + Shadow tab)
   useEffect(() => {
     if (backendOffline) return
     let cancelled = false
     const ac = new AbortController()
+    const targetKey = currentShadowKey
 
     void (async () => {
       try {
@@ -238,10 +292,26 @@ function Training({ onNavigate }: TrainingProps) {
         })
         if (!cancelled) {
           setShadowData(res)
+          setShadowLoadedAtMs(Date.now())
+          setShadowError(null)
         }
-      } catch {
+      } catch (err) {
         if (!cancelled) {
+          const isNetwork =
+            err instanceof BackendApiError ? err.status === null : false
+          if (isNetwork) {
+            setBackendOffline(true)
+          }
           setShadowData(null)
+          setShadowError(
+            err instanceof Error
+              ? err.message
+              : 'Failed to load live shadow operations.',
+          )
+        }
+      } finally {
+        if (!cancelled) {
+          setShadowFetchedKey(targetKey)
         }
       }
     })()
@@ -250,7 +320,7 @@ function Training({ onNavigate }: TrainingProps) {
       cancelled = true
       ac.abort()
     }
-  }, [backendOffline, reloadNonce, selectedItem.presetId])
+  }, [backendOffline, currentShadowKey, selectedItem.presetId])
 
   const handleToggleSection = useCallback((key: keyof TrainingSectionState) => {
     setSections((prev) => {
@@ -265,6 +335,8 @@ function Training({ onNavigate }: TrainingProps) {
       const found = catalog.find((item) => item.id === id)
       if (!found) return
       setSelectedCatalogId(id)
+      setWorkingPreset(found.preset)
+      setClamps([])
       setDraft(buildDefaultDraft(found, Date.now()))
       setRunError(null)
       setPartialMissingSpans([])
@@ -285,6 +357,8 @@ function Training({ onNavigate }: TrainingProps) {
         const matchingItem = catalog.find((c) => c.presetId === fullRun.presetId)
         if (matchingItem) {
           setSelectedCatalogId(matchingItem.id)
+          setWorkingPreset(matchingItem.preset)
+          setClamps([])
         }
       } catch (err) {
         setRunError(err instanceof Error ? err.message : String(err))
@@ -297,8 +371,130 @@ function Training({ onNavigate }: TrainingProps) {
     setRunsLoading(true)
     setRunsError(null)
     setRunError(null)
+    setShadowError(null)
+    setBackendOffline(false)
     setReloadNonce((n) => n + 1)
   }, [])
+
+  const handleRefreshShadow = useCallback(() => {
+    if (backendOffline) {
+      handleRetryAll()
+      return
+    }
+    setShadowNonce((n) => n + 1)
+  }, [backendOffline, handleRetryAll])
+
+  const handlePatchWorkingPreset = useCallback((patch: StrategyPresetPatch) => {
+    setWorkingPreset((prev) => {
+      const { preset: next, clamps: newClamps } = applyPresetPatchWithClamps(
+        prev,
+        patch,
+      )
+      setClamps(newClamps)
+      // Sync execution & market fields cleanly with the RunConfig draft
+      setDraft((prevDraft) => ({
+        ...prevDraft,
+        pair: next.strategy.pair,
+        timeframe: next.timeframe,
+        commissionPct: String(next.execution.commissionPct),
+        slippagePct: String(next.execution.slippagePct),
+        initialBalance: String(next.execution.initialBalance),
+        allowShort: next.execution.allowShort,
+      }))
+      return next
+    })
+  }, [])
+
+  const handleResetToCatalog = useCallback(() => {
+    setWorkingPreset(catalogBasePreset)
+    setClamps([])
+    setDraft((prevDraft) => ({
+      ...prevDraft,
+      pair: catalogBasePreset.strategy.pair,
+      timeframe: catalogBasePreset.timeframe,
+      commissionPct: String(catalogBasePreset.execution.commissionPct),
+      slippagePct: String(catalogBasePreset.execution.slippagePct),
+      initialBalance: String(catalogBasePreset.execution.initialBalance),
+      allowShort: catalogBasePreset.execution.allowShort,
+    }))
+  }, [catalogBasePreset])
+
+  const handleSaveProfile = useCallback(
+    (name: string) => {
+      const nextList = upsertCustomBotProfile(workingPreset, name)
+      setCustomProfiles(nextList)
+      if (nextList[0]) {
+        setSelectedCatalogId(nextList[0].id)
+        setWorkingPreset(nextList[0].preset)
+        setClamps([])
+      }
+    },
+    [workingPreset],
+  )
+
+  const handleDuplicateProfile = useCallback(
+    (name: string) => {
+      const nextList = upsertCustomBotProfile(workingPreset, name)
+      setCustomProfiles(nextList)
+      if (nextList[0]) {
+        setSelectedCatalogId(nextList[0].id)
+        setWorkingPreset(nextList[0].preset)
+        setClamps([])
+      }
+    },
+    [workingPreset],
+  )
+
+  const handleDeleteProfile = useCallback((profileId: string) => {
+    const nextList = deleteCustomBotProfile(profileId)
+    setCustomProfiles(nextList)
+    const fallbackCatalog = buildTrainingCatalog(nextList)
+    if (fallbackCatalog[0]) {
+      setSelectedCatalogId(fallbackCatalog[0].id)
+      setWorkingPreset(fallbackCatalog[0].preset)
+      setClamps([])
+      setDraft(buildDefaultDraft(fallbackCatalog[0], Date.now()))
+    }
+  }, [])
+
+  const handlePromoteStrategy = useCallback(async (): Promise<{
+    ok: boolean
+    message: string
+  }> => {
+    const plan = buildPromotionPlan(
+      selectedItem,
+      workingPreset,
+      validation.isResearchVariant,
+    )
+    if (!plan.allowed) {
+      return {
+        ok: false,
+        message: t('training.customPromoteBlockedResearch'),
+      }
+    }
+    try {
+      const snap = await selectBotPresetOnServer(plan.payload)
+      setShadowNonce((n) => n + 1)
+      return {
+        ok: true,
+        message: t('training.customPromoteSuccess', {
+          name: snap.preset.name,
+          pair: snap.preset.strategy.pair,
+          tf: snap.preset.timeframe,
+        }),
+      }
+    } catch (err) {
+      if (err instanceof BackendApiError && err.status === null) {
+        setBackendOffline(true)
+      }
+      return {
+        ok: false,
+        message: t('training.customPromoteFailed', {
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      }
+    }
+  }, [selectedItem, t, validation.isResearchVariant, workingPreset])
 
   const handleCancelRun = useCallback(async () => {
     const currentId = activeRunIdRef.current
@@ -342,7 +538,11 @@ function Training({ onNavigate }: TrainingProps) {
 
     let createdRunId: string | null = null
     try {
-      const config = draftToTrainingConfig(draft, selectedItem, validation)
+      const config = draftToTrainingConfig(
+        draft,
+        effectiveSelectedItem,
+        validation,
+      )
 
       // 1. Fetch real historical candles ONCE via archive-first /api/market/history
       const history = await fetchHistoricalCandlesApi({
@@ -370,8 +570,9 @@ function Training({ onNavigate }: TrainingProps) {
           config,
           candleCount: history.candles.length,
           dataSource: history.source,
-          ...(selectedItem.kind === 'custom-profile'
-            ? { customPreset: selectedItem.preset }
+          ...(selectedItem.kind === 'custom-profile' ||
+          workingPreset !== selectedItem.preset
+            ? { customPreset: workingPreset }
             : {}),
         },
         ac.signal,
@@ -389,7 +590,7 @@ function Training({ onNavigate }: TrainingProps) {
       // 3. Offload Fit -> Validate -> Test to dedicated training Web Worker
       const job = await runTrainingOffloaded({
         candles: history.candles,
-        preset: selectedItem.preset,
+        preset: workingPreset,
         config,
         signal: ac.signal,
         onProgress: (p) => setProgress(p),
@@ -457,7 +658,15 @@ function Training({ onNavigate }: TrainingProps) {
     } finally {
       abortRef.current = null
     }
-  }, [backendOffline, draft, runStatus, selectedItem, validation])
+  }, [
+    backendOffline,
+    draft,
+    effectiveSelectedItem,
+    runStatus,
+    selectedItem,
+    validation,
+    workingPreset,
+  ])
 
   const displayedRun =
     selectedRun && selectedRun.presetId === selectedItem.presetId
@@ -466,7 +675,7 @@ function Training({ onNavigate }: TrainingProps) {
 
   const displayedPresetName = displayedRun
     ? (presetNameMap.get(displayedRun.presetId) ?? displayedRun.presetId)
-    : selectedItem.preset.name
+    : workingPreset.name
 
   const barStatus: TrainingRunStatus | 'idle' =
     runStatus === 'running'
@@ -532,7 +741,7 @@ function Training({ onNavigate }: TrainingProps) {
       {/* Sticky Run Status Bar (isolated progress updates) */}
       <RunBar
         status={barStatus}
-        strategyName={selectedItem.preset.name}
+        strategyName={workingPreset.name}
         pair={draft.pair}
         timeframe={draft.timeframe}
         fromTimeMs={validation.fromTimeMs}
@@ -548,7 +757,9 @@ function Training({ onNavigate }: TrainingProps) {
       <div
         className={cn(
           'grid grid-cols-1 gap-4',
-          sections.catalog ? 'xl:grid-cols-[296px_minmax(0,1fr)]' : 'xl:grid-cols-[180px_minmax(0,1fr)]',
+          sections.catalog
+            ? 'xl:grid-cols-[296px_minmax(0,1fr)]'
+            : 'xl:grid-cols-[180px_minmax(0,1fr)]',
         )}
       >
         <StrategyCatalog
@@ -563,7 +774,7 @@ function Training({ onNavigate }: TrainingProps) {
 
         <div className="flex min-w-0 flex-col gap-4">
           <RunConfig
-            selectedItem={selectedItem}
+            selectedItem={effectiveSelectedItem}
             draft={draft}
             validation={validation}
             backendOffline={backendOffline}
@@ -573,17 +784,23 @@ function Training({ onNavigate }: TrainingProps) {
             onStartRun={() => void handleStartRun()}
           />
 
-          <Tabs
-            value={activeTab}
-            onValueChange={(v) => setActiveTab(v as WorkspaceTab)}
-            className="w-full"
-          >
+          <section aria-labelledby="training-workspace-heading">
+            <h2 id="training-workspace-heading" className="sr-only">
+              {t('training.workspaceAria')}
+            </h2>
+            <Tabs
+              value={activeTab}
+              onValueChange={(v) => setActiveTab(v as WorkspaceTab)}
+              className="w-full"
+            >
             <TabsList className="w-full justify-start overflow-x-auto">
               <TabsTrigger value="overview">{t('training.tabOverview')}</TabsTrigger>
               <TabsTrigger value="folds">{t('training.tabFolds')}</TabsTrigger>
               <TabsTrigger value="trades">{t('training.tabTrades')}</TabsTrigger>
               <TabsTrigger value="equity">{t('training.tabEquity')}</TabsTrigger>
               <TabsTrigger value="backtest">{t('training.tabBacktest')}</TabsTrigger>
+              <TabsTrigger value="shadow">{t('training.tabShadow')}</TabsTrigger>
+              <TabsTrigger value="customize">{t('training.tabCustomize')}</TabsTrigger>
             </TabsList>
 
             <TabsContent value="overview" className="mt-3">
@@ -614,14 +831,49 @@ function Training({ onNavigate }: TrainingProps) {
 
             <TabsContent value="backtest" className="mt-3">
               <BacktestTab
-                selectedItem={selectedItem}
+                selectedItem={effectiveSelectedItem}
                 run={displayedRun}
                 cachedCandles={lastFetchedCandles}
                 backendOffline={backendOffline}
                 onNavigate={onNavigate}
               />
             </TabsContent>
-          </Tabs>
+
+            <TabsContent value="shadow" className="mt-3">
+              <ShadowTab
+                presetId={selectedItem.presetId}
+                presetName={workingPreset.name}
+                run={displayedRun}
+                shadowData={shadowData}
+                shadowLoadedAtMs={shadowLoadedAtMs}
+                loading={shadowLoading}
+                error={shadowError}
+                backendOffline={backendOffline}
+                nowMs={nowMs}
+                onRefresh={handleRefreshShadow}
+              />
+            </TabsContent>
+
+            <TabsContent value="customize" className="mt-3">
+              <CustomizePanel
+                selectedItem={selectedItem}
+                draftPreset={workingPreset}
+                catalogBase={catalogBasePreset}
+                clamps={clamps}
+                isResearchVariant={validation.isResearchVariant}
+                backendOffline={backendOffline}
+                customProfileCount={customProfiles.length}
+                activeRun={displayedRun}
+                onPatchPreset={handlePatchWorkingPreset}
+                onResetToCatalog={handleResetToCatalog}
+                onSaveProfile={handleSaveProfile}
+                onDuplicateProfile={handleDuplicateProfile}
+                onDeleteProfile={handleDeleteProfile}
+                onPromote={handlePromoteStrategy}
+              />
+            </TabsContent>
+            </Tabs>
+          </section>
         </div>
       </div>
 

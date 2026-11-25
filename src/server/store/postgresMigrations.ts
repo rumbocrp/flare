@@ -283,4 +283,41 @@ export const POSTGRES_MIGRATIONS: readonly SqlMigration[] = [
         ON training_runs (tenant_id, preset_id, created_at DESC)`,
     ],
   },
+  {
+    version: 6,
+    name: 'exchange_positions_pnl_attribution',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS exchange_positions (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        preset_id TEXT,
+        pair TEXT NOT NULL,
+        side TEXT NOT NULL,
+        status TEXT NOT NULL,
+        entry_order_id TEXT NOT NULL,
+        entry_venue_order_id TEXT,
+        exit_order_id TEXT,
+        exit_venue_order_id TEXT,
+        entry_qty DOUBLE PRECISION NOT NULL,
+        exit_qty DOUBLE PRECISION,
+        entry_avg_price DOUBLE PRECISION NOT NULL,
+        exit_avg_price DOUBLE PRECISION,
+        entry_fee_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
+        exit_fee_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
+        stop_price DOUBLE PRECISION,
+        target_price DOUBLE PRECISION,
+        protection_order_id TEXT,
+        realized_pnl_usd DOUBLE PRECISION,
+        r_multiple DOUBLE PRECISION,
+        exit_reason TEXT,
+        opened_at TIMESTAMPTZ NOT NULL,
+        closed_at TIMESTAMPTZ
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_exchange_positions_tenant_mode_status
+        ON exchange_positions (tenant_id, mode, status, opened_at DESC)`,
+      `CREATE INDEX IF NOT EXISTS idx_exchange_positions_tenant_preset_closed
+        ON exchange_positions (tenant_id, preset_id, closed_at DESC)`,
+    ],
+  },
 ]

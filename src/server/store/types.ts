@@ -246,6 +246,46 @@ export type PredictionTradeQueryOptions = {
   limit?: number
 }
 
+export type ExchangePositionMode = 'binance-testnet' | 'binance-live'
+
+export type ExchangePositionStatus = 'OPEN' | 'CLOSED'
+
+export type ExchangePositionRecord = {
+  id: string
+  tenantId: string
+  mode: ExchangePositionMode
+  presetId: string | null
+  pair: string
+  side: 'LONG' | 'SHORT'
+  status: ExchangePositionStatus
+  entryOrderId: string
+  entryVenueOrderId: string | null
+  exitOrderId: string | null
+  exitVenueOrderId: string | null
+  entryQty: number
+  exitQty: number | null
+  entryAvgPrice: number
+  exitAvgPrice: number | null
+  entryFeeUsd: number
+  exitFeeUsd: number
+  stopPrice: number | null
+  targetPrice: number | null
+  protectionOrderId: string | null
+  realizedPnlUsd: number | null
+  rMultiple: number | null
+  exitReason: string | null
+  openedAt: string
+  closedAt: string | null
+}
+
+export type ExchangePositionQueryOptions = {
+  mode?: ExchangePositionMode
+  presetId?: string
+  pair?: string
+  status?: ExchangePositionStatus
+  limit?: number
+}
+
 export type RetentionPruneReport = {
   retentionDays: number
   cutoffIso: string
@@ -355,6 +395,12 @@ export interface StateStore {
 
   setStrategyModeState(state: StoredStrategyState): Promise<void>
   getStrategyModeStates(tenantId: string): Promise<StoredStrategyState[]>
+
+  upsertExchangePosition(position: ExchangePositionRecord): Promise<void>
+  queryExchangePositions(
+    tenantId: string,
+    options?: ExchangePositionQueryOptions,
+  ): Promise<ExchangePositionRecord[]>
 
   pruneRetention(
     retentionDays?: number,
